@@ -60,6 +60,20 @@ pub fn merge_upstream(dir: &Path, rua_paths: &RuaPaths) {
 		.ok();
 }
 
+/// Short SHA of HEAD in the repo at `dir`, or None if not a repo or rev-parse fails.
+pub fn head_short_rev(dir: &Path, rua_paths: &RuaPaths) -> Option<String> {
+	let out = git(dir, rua_paths)
+		.args(["rev-parse", "--short=7", "HEAD"])
+		.stderr(Stdio::null())
+		.output()
+		.ok()?;
+	if !out.status.success() {
+		return None;
+	}
+	let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+	Some(s).filter(|s| !s.is_empty())
+}
+
 fn silently_run_panic_if_error(args: &[&str], dir: &Path, rua_paths: &RuaPaths) {
 	let command = git(dir, rua_paths)
 		.args(args)

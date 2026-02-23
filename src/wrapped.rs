@@ -150,10 +150,17 @@ fn build_local(dir: &str, rua_paths: &RuaPaths, offline: bool, force: bool) {
 }
 
 pub fn build_directory(dir: &str, rua_paths: &RuaPaths, offline: bool, force: bool) {
+	// If the directory is a symlink, we need to resolve it to the real path
+	// Otherwise, the jail will not include the actual contents of the directory, and installation will fail
+	let dir = fs::canonicalize(dir)
+		.unwrap_or_else(|err| panic!("Cannot canonicalize path {:?}, {}", dir, err))
+		.to_str()
+		.expect("Non-UTF8 directory name")
+		.to_string();
 	if offline {
-		download_srcinfo_sources(dir, rua_paths);
+		download_srcinfo_sources(&dir, rua_paths);
 	}
-	build_local(dir, rua_paths, offline, force);
+	build_local(&dir, rua_paths, offline, force);
 }
 
 /// Perform a shellcheck check of a PKGBUILD, taking care of special variables

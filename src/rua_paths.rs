@@ -122,6 +122,23 @@ impl RuaPaths {
 		self.global_build_dir.join(pkgbase)
 	}
 
+	/// Newer rua build_dirs are actually a symlink from pkgbase -> pkgbase-<short_rev>
+	/// And this function returns just the short SHA if exists
+	pub fn build_dir_rev(&self, pkgbase: &str) -> Option<String> {
+		let p = self.build_dir(pkgbase);
+		let meta = fs::symlink_metadata(&p).ok()?;
+		if !meta.file_type().is_symlink() {
+			return None;
+		}
+		let canonical = fs::canonicalize(&p).ok()?;
+		let last = canonical.file_name().and_then(|n| n.to_str())?;
+		let r = last.rfind('-')?;
+		if r == 0 || &last[..r] != pkgbase {
+			return None;
+		}
+		Some(last[r + 1..].to_string())
+	}
+
 	/// Same as `global_checked_tars_dir`, but for a specific pkgbase
 	pub fn checked_tars_dir(&self, pkg_name: &str) -> PathBuf {
 		self.global_checked_tars_dir.join(pkg_name)

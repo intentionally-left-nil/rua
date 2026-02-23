@@ -1,5 +1,6 @@
 use crate::alpm_wrapper::new_alpm_wrapper;
 use crate::aur_rpc_utils;
+use crate::git_utils;
 use crate::pacman;
 use crate::reviewing;
 use crate::rua_paths::RuaPaths;
@@ -40,32 +41,89 @@ pub fn install(targets: &[String], rua_paths: &RuaPaths, is_offline: bool, asdep
 	}
 
 	show_install_summary(&pacman_deps, &split_to_depth);
+	let mut cached_pkgs: HashSet<String> = HashSet::new();
 	for pkgbase in split_to_pkgbase.values().collect::<HashSet<_>>() {
 		let dir = rua_paths.review_dir(pkgbase);
 		fs::create_dir_all(&dir).unwrap_or_else(|err| {
 			panic!("Failed to create repository dir for {}, {}", pkgbase, err)
 		});
-		reviewing::review_repo(&dir, pkgbase, rua_paths);
+		reviewing::review_repo(&dir, pkgbase, rua_paths, &mut cached_pkgs);
 	}
 	pacman::ensure_pacman_packages_installed(pacman_deps);
+	let pkgbases_for_cleanup: HashSet<String> = split_to_pkgbase.values().cloned().collect();
 	install_all(
 		rua_paths,
 		split_to_depth,
 		split_to_pkgbase,
 		is_offline,
 		asdeps,
+		&cached_pkgs,
 	);
-	for target in targets {
-		// Delete temp directories after successful build+install
-		if let Err(err) = rm_rf::remove(rua_paths.build_dir(target)) {
-			eprintln!(
-				"Failed to clean/delete temporary build directory {:?}, {}",
-				rua_paths.build_dir(target),
-				err
-			);
-			std::process::exit(1)
-		}
+	for pkgbase in &pkgbases_for_cleanup {
+		ensure_build_dir_removed(rua_paths, pkgbase);
 	}
+}
+
+fn ensure_build_dir_removed(rua_paths: &RuaPaths, pkgbase: &str) {
+	let p = rua_paths.build_dir(pkgbase);
+	if !p.exists() {
+		return;
+	}
+	let meta = match fs::symlink_metadata(&p) {
+		Ok(m) => m,
+		Err(_) => return,
+	};
+	if meta.file_type().is_symlink() {
+		if let Ok(canonical) = fs::canonicalize(&p) {
+			rm_rf::ensure_removed(&canonical).unwrap_or_else(|err| {
+				panic!("Failed to remove build dir target {:?}, {}", canonical, err)
+			});
+		}
+		fs::remove_file(&p)
+			.unwrap_or_else(|err| panic!("Failed to remove build dir symlink {:?}, {}", p, err));
+	} else if meta.file_type().is_dir() {
+		rm_rf::ensure_removed(&p)
+			.unwrap_or_else(|err| panic!("Failed to remove build dir {:?}, {}", p, err));
+	}
+}
+
+fn create_build_dir(rua_paths: &RuaPaths, pkgbase: &str, short_rev: &str) -> PathBuf {
+	ensure_build_dir_removed(rua_paths, pkgbase);
+	let rev_dir = rua_paths
+		.global_build_dir
+		.join(format!("{}-{}", pkgbase, short_rev));
+	rm_rf::ensure_removed(&rev_dir)
+		.unwrap_or_else(|err| panic!("Failed to remove existing rev dir {:?}, {}", &rev_dir, err));
+	std::fs::create_dir_all(&rev_dir)
+		.unwrap_or_else(|err| panic!("Failed to create build dir {:?}, {}", &rev_dir, err));
+	let rev_dir_name = rev_dir
+		.file_name()
+		.expect("rev_dir has no file name")
+		.to_str()
+		.expect("rev_dir name not UTF-8")
+		.to_string();
+	let symlink_path = rua_paths.build_dir(pkgbase);
+	std::os::unix::fs::symlink(&rev_dir_name, &symlink_path).unwrap_or_else(|err| {
+		panic!(
+			"Failed to create symlink {:?} -> {:?}, {}",
+			symlink_path, rev_dir_name, err
+		)
+	});
+	symlink_path
+}
+
+fn build_dir_has_pkg_files(rua_paths: &RuaPaths, pkgbase: &str) -> bool {
+	let build_dir = rua_paths.build_dir(pkgbase);
+	let read_dir = match fs::read_dir(&build_dir) {
+		Ok(d) => d,
+		Err(_) => return false,
+	};
+	read_dir.filter_map(|e| e.ok()).any(|e| {
+		e.path()
+			.file_name()
+			.and_then(|n| n.to_str())
+			.map_or(false, |n| n.ends_with(&rua_paths.makepkg_pkgext))
+	})
 }
 
 fn show_install_summary(pacman_deps: &IndexSet<String>, aur_packages: &IndexMap<String, i32>) {
@@ -104,6 +162,7 @@ fn install_all(
 	split_to_pkgbase: IndexMap<String, String>,
 	offline: bool,
 	asdeps: bool,
+	cached_pkgs: &HashSet<String>,
 ) {
 	let archive_whitelist = split_to_depth
 		.iter()
@@ -132,35 +191,31 @@ fn install_all(
 		let packages = packages.collect::<Vec<&(String, i32, String)>>();
 		for (pkgbase, _depth, _split) in &packages {
 			let review_dir = rua_paths.review_dir(pkgbase);
-			let build_dir = rua_paths.build_dir(pkgbase);
-			rm_rf::ensure_removed(&build_dir).unwrap_or_else(|err| {
-				panic!("Failed to remove old build dir {:?}, {}", &build_dir, err)
-			});
-			std::fs::create_dir_all(&build_dir).unwrap_or_else(|err| {
-				panic!("Failed to create build dir {:?}, {}", &build_dir, err)
-			});
-			fs_extra::copy_items(
-				&[&review_dir],
-				&rua_paths.global_build_dir,
-				&CopyOptions::new(),
-			)
-			.unwrap_or_else(|err| {
-				panic!(
-					"failed to copy reviewed dir {:?} to build dir {:?}, error is {}",
-					&review_dir, rua_paths.global_build_dir, err
-				)
-			});
-			{
-				let dir_to_remove = build_dir.join(".git");
-				rm_rf::ensure_removed(build_dir.join(".git"))
-					.unwrap_or_else(|err| panic!("Failed to remove {:?}, {}", dir_to_remove, err));
+			let short_rev = git_utils::head_short_rev(&review_dir, rua_paths)
+				.unwrap_or_else(|| "head".to_string());
+			let use_cache = cached_pkgs.contains(pkgbase.as_str())
+				&& rua_paths.build_dir_rev(pkgbase).as_deref() == Some(short_rev.as_str())
+				&& build_dir_has_pkg_files(rua_paths, pkgbase);
+			if !use_cache {
+				let symlink_path = create_build_dir(rua_paths, pkgbase, &short_rev);
+				let mut copy_opts = CopyOptions::new();
+				copy_opts.content_only = true;
+				fs_extra::dir::copy(&review_dir, &symlink_path, &copy_opts).unwrap_or_else(|err| {
+					panic!(
+						"failed to copy reviewed dir {:?} to build dir {:?}, error is {}",
+						&review_dir, &symlink_path, err
+					)
+				});
+				rm_rf::ensure_removed(symlink_path.join(".git")).unwrap_or_else(|err| {
+					panic!("Failed to remove {:?}, {}", symlink_path.join(".git"), err)
+				});
+				wrapped::build_directory(
+					symlink_path.to_str().expect("Non-UTF8 directory name"),
+					rua_paths,
+					offline,
+					false,
+				);
 			}
-			wrapped::build_directory(
-				build_dir.to_str().expect("Non-UTF8 directory name"),
-				rua_paths,
-				offline,
-				false,
-			);
 		}
 		for (pkgbase, _depth, _split) in &packages {
 			check_tars_and_move(pkgbase, rua_paths, &archive_whitelist);

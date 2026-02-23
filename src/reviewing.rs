@@ -4,9 +4,15 @@ use crate::terminal_util;
 use crate::wrapped;
 use colored::Colorize;
 use log::debug;
+use std::collections::HashSet;
 use std::path::Path;
 
-pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths) {
+pub fn review_repo(
+	dir: &Path,
+	pkgbase: &str,
+	rua_paths: &RuaPaths,
+	cached_pkgs: &mut HashSet<String>,
+) {
 	let mut dir_contents = dir.read_dir().unwrap_or_else(|err| {
 		panic!(
 			"{}:{} Failed to read directory for reviewing, {}",
@@ -23,20 +29,26 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths) {
 		git_utils::fetch(dir, rua_paths);
 	}
 
-	let build_dir = rua_paths.build_dir(pkgbase);
-	if build_dir.exists() && git_utils::is_upstream_merged(dir, rua_paths) {
-		eprintln!("WARNING: your AUR repo is up-to-date.");
-		eprintln!(
-			"If you continue, the build directory will be removed and the build will be re-run."
-		);
-		eprintln!("If you don't want that, consider resolving the situation manually,");
-		let build_dir = terminal_util::escape_bash_arg(
-			build_dir
-				.to_str()
-				.unwrap_or_else(|| panic!("Failed to stringify build directory {:?}", build_dir)),
-		);
-		eprintln!("for example:    rua builddir {}", build_dir);
-		eprintln!();
+	let is_upstream_merged = git_utils::is_upstream_merged(dir, rua_paths);
+	let current_head = git_utils::head_short_rev(dir, rua_paths);
+	let underlying_sha = rua_paths.build_dir_rev(pkgbase);
+	let reusable = current_head.as_deref() == underlying_sha.as_deref()
+		&& is_upstream_merged
+		&& build_dir_contains_built_package(rua_paths, pkgbase);
+
+	if reusable {
+		loop {
+			eprint!("Use existing build (same commit)? [R]=rebuild, [C]=use cached. ");
+			let input = terminal_util::read_line_lowercase();
+			if &input == "c" {
+				cached_pkgs.insert(pkgbase.to_string());
+				return;
+			}
+			if &input == "r" {
+				break;
+			}
+			break;
+		}
 	}
 
 	loop {
@@ -104,4 +116,18 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths) {
 			break;
 		}
 	}
+	cached_pkgs.insert(pkgbase.to_string());
+}
+
+fn build_dir_contains_built_package(rua_paths: &RuaPaths, pkgbase: &str) -> bool {
+	let build_dir = match std::fs::read_dir(&rua_paths.build_dir(pkgbase)) {
+		Ok(d) => d,
+		Err(_) => return false,
+	};
+	build_dir.filter_map(|e| e.ok()).any(|e| {
+		e.path()
+			.file_name()
+			.and_then(|n| n.to_str())
+			.map_or(false, |n| n.ends_with(&rua_paths.makepkg_pkgext))
+	})
 }
