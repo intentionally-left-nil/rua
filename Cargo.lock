@@ -1708,6 +1708,8 @@ dependencies = [
  "regex",
  "rm_rf",
  "ruzstd",
+ "serde",
+ "serde_json",
  "srcinfo",
  "structopt",
  "tar",
