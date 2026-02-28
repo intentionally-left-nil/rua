@@ -69,6 +69,7 @@ fn main() {
 		Action::Upgrade {
 			devel,
 			printonly,
+			auto_merge,
 			ignored,
 		} => {
 			let ignored_set = ignored
@@ -79,7 +80,7 @@ fn main() {
 				action_upgrade::upgrade_printonly(*devel, &ignored_set);
 			} else {
 				let paths = rua_paths::RuaPaths::initialize_paths();
-				action_upgrade::upgrade_real(*devel, &paths, &ignored_set);
+				action_upgrade::upgrade_real(*devel, &paths, &ignored_set, *auto_merge);
 			}
 		}
 	};

@@ -2,6 +2,7 @@ use crate::action_install;
 use crate::alpm_wrapper::new_alpm_wrapper;
 use crate::alpm_wrapper::AlpmWrapper;
 use crate::aur_rpc_utils;
+use crate::cli_args::AutoMerge;
 use crate::pacman;
 use crate::rua_paths::RuaPaths;
 use crate::terminal_util;
@@ -45,7 +46,24 @@ pub fn upgrade_printonly(devel: bool, ignored: &HashSet<&str>) {
 	}
 }
 
-pub fn upgrade_real(devel: bool, rua_paths: &RuaPaths, ignored: &HashSet<&str>) {
+pub fn upgrade_real(
+	devel: bool,
+	rua_paths: &RuaPaths,
+	ignored: &HashSet<&str>,
+	auto_merge: AutoMerge,
+) {
+	match auto_merge {
+		AutoMerge::low => {
+			eprintln!("Note: --auto-merge is set to low, but this feature is not yet functional.");
+		}
+		AutoMerge::medium => {
+			eprintln!(
+				"Note: --auto-merge is set to medium, but this feature is not yet functional."
+			);
+		}
+		AutoMerge::off => {}
+	}
+
 	let alpm = new_alpm_wrapper();
 	let (outdated, nonexistent) =
 		calculate_upgrade(&*alpm, devel, ignored).expect("calculating upgrade failed");
