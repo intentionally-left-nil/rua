@@ -10,6 +10,13 @@ pub enum CLIColorType {
 	Always,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AutoMerge {
+	Off,
+	Low,
+	Medium,
+}
+
 #[derive(Parser)]
 #[command(version, about, long_about = None, after_help = after_help())]
 pub struct CliArgs {
@@ -85,6 +92,11 @@ pub enum Action {
 		/// Print the list of outdated packages to stdout, delimited by newline. Don't upgrade anything, don't ask questions (for use in scripts). Exits with code 7 if no upgrades are available.
 		#[arg(long)]
 		printonly: bool,
+
+		/// Automatically merge low-risk package updates without manual review.
+		/// Accepts: off, low, medium.
+		#[arg(long, value_enum, default_value_t = AutoMerge::Off, ignore_case = true)]
+		auto_merge: AutoMerge,
 
 		/// Don't upgrade the specified package(s). Accepts multiple arguments separated by `,`.
 		#[arg(long)]
