@@ -1,3 +1,4 @@
+pub use auto_merge_mod::AutoMerge;
 pub use cli_color_type_mod::CLIColorType;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -13,6 +14,19 @@ pub mod cli_color_type_mod {
 		#[derive(Debug)]
 		pub enum CLIColorType {
 			auto, never, always
+		}
+	}
+}
+
+pub mod auto_merge_mod {
+	#![allow(clippy::useless_vec)]
+	use structopt::clap::arg_enum;
+
+	arg_enum! {
+		#[allow(non_camel_case_types)]
+		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		pub enum AutoMerge {
+			off, low, medium
 		}
 	}
 }
@@ -116,6 +130,15 @@ Supports: git, hg, bzr, svn, cvs, darcs. Currently by suffix only."
 			help = "Print the list of outdated packages to stdout, delimited by newline. Don't upgrade anything, don't ask questions (for use in scripts). Exits with code 7 if no upgrades are available."
 		)]
 		printonly: bool,
+		#[structopt(
+			long = "auto-merge",
+			possible_values = &AutoMerge::variants(),
+			case_insensitive = true,
+			default_value = "off",
+			help = "Automatically merge low-risk package updates without manual review.
+Accepts: off, low, medium."
+		)]
+		auto_merge: AutoMerge,
 		#[structopt(
 			long = "ignore",
 			help = "Don't upgrade the specified package(s). Accepts multiple arguments separated by `,`."

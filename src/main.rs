@@ -69,6 +69,7 @@ fn main() {
 		Action::Upgrade {
 			devel,
 			printonly,
+			auto_merge,
 			ignored,
 			packages,
 		} => {
@@ -77,11 +78,18 @@ fn main() {
 				.flat_map(|i| i.split(','))
 				.collect::<HashSet<&str>>();
 			let only_packages: HashSet<&str> = packages.iter().map(String::as_str).collect();
+			let auto_merge = *auto_merge;
 			let result = if *printonly {
 				action_upgrade::upgrade_printonly(*devel, &ignored_set, &only_packages)
 			} else {
 				let paths = rua_paths::RuaPaths::initialize_paths();
-				action_upgrade::upgrade_real(*devel, &paths, &ignored_set, &only_packages)
+				action_upgrade::upgrade_real(
+					*devel,
+					&paths,
+					&ignored_set,
+					&only_packages,
+					auto_merge,
+				)
 			};
 			if let Err(e) = result {
 				eprintln!("{}", e);
