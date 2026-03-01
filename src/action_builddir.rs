@@ -20,7 +20,7 @@ pub fn action_builddir(dir: &Option<PathBuf>, rua_paths: &RuaPaths, offline: boo
 		.unwrap_or_else(|| panic!("{}:{} Cannot parse CLI target directory", file!(), line!()));
 	wrapped::build_directory(dir_str, rua_paths, offline, force);
 
-	let srcinfo = wrapped::generate_srcinfo(dir_str, rua_paths).expect("Failed to obtain SRCINFO");
+	let srcinfo = wrapped::generate_srcinfo(dir_str).expect("Failed to obtain SRCINFO");
 	let ver = srcinfo.version();
 	let packages = srcinfo.pkgs().iter().map(|package| {
 		let arch = if package.arch().contains(&*pacman::PACMAN_ARCH) {

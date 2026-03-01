@@ -1713,6 +1713,7 @@ dependencies = [
  "srcinfo",
  "structopt",
  "tar",
+ "tempfile",
  "termize",
  "uname",
  "xz2",
