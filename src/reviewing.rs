@@ -1,12 +1,54 @@
+use crate::cli_args::AutoMerge;
 use crate::git_utils;
 use crate::rua_paths::RuaPaths;
 use crate::terminal_util;
 use crate::wrapped;
 use colored::Colorize;
 use log::debug;
+use srcinfo::Srcinfo;
 use std::path::Path;
+use std::str::FromStr;
 
-pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths) {
+enum SrcinfoValidation {
+	/// SRCINFO was generated successfully and matches upstream.
+	Matches,
+	/// SRCINFO was generated successfully but does not match upstream.
+	Mismatch,
+	/// SRCINFO could not be generated (e.g. bwrap/makepkg failure).
+	GenerationFailed(String),
+}
+
+fn validate_upstream_srcinfo(dir: &Path, rua_paths: &RuaPaths) -> SrcinfoValidation {
+	let aur_srcinfo_text = git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
+	let aur_srcinfo = Srcinfo::from_str(&aur_srcinfo_text)
+		.unwrap_or_else(|e| panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e));
+
+	let pkgbuild_text = git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
+
+	let tmp_dir = tempfile::TempDir::new().expect("Failed to create temp directory");
+
+	let pkgbuild_path = tmp_dir.path().join("PKGBUILD");
+	std::fs::write(&pkgbuild_path, &pkgbuild_text)
+		.expect("Failed to write PKGBUILD to temp directory");
+
+	let tmp_dir_str = tmp_dir
+		.path()
+		.to_str()
+		.expect("Temp directory path is not valid UTF-8");
+
+	let generated_srcinfo = match wrapped::generate_srcinfo(tmp_dir_str) {
+		Ok(s) => s,
+		Err(e) => return SrcinfoValidation::GenerationFailed(e),
+	};
+
+	if aur_srcinfo == generated_srcinfo {
+		SrcinfoValidation::Matches
+	} else {
+		SrcinfoValidation::Mismatch
+	}
+}
+
+pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: AutoMerge) {
 	let mut dir_contents = dir.read_dir().unwrap_or_else(|err| {
 		panic!(
 			"{}:{} Failed to read directory for reviewing, {}",
@@ -37,6 +79,37 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths) {
 		);
 		eprintln!("for example:    rua builddir {}", build_dir);
 		eprintln!();
+	}
+
+	if auto_merge != AutoMerge::off {
+		match validate_upstream_srcinfo(dir, rua_paths) {
+			SrcinfoValidation::GenerationFailed(reason) => {
+				eprintln!(
+					"Auto-merge: could not generate SRCINFO for {}, skipping auto-merge.\n{}",
+					pkgbase, reason
+				);
+			}
+			SrcinfoValidation::Mismatch => {
+				eprintln!(
+					"Auto-merge: upstream .SRCINFO does not match the locally generated SRCINFO \
+					for {}.",
+					pkgbase
+				);
+				eprintln!("Would you like to proceed anyway? [y/N]");
+				let input = terminal_util::read_line_lowercase();
+				if input != "y" {
+					eprintln!("Aborting.");
+					std::process::exit(1);
+				}
+			}
+			SrcinfoValidation::Matches => {
+				eprintln!(
+					"Auto-merge: SRCINFO matches for {}. \
+					Note: auto-merge is not yet fully implemented, proceeding with manual review.",
+					pkgbase
+				);
+			}
+		}
 	}
 
 	loop {

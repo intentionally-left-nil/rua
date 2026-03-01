@@ -52,18 +52,6 @@ pub fn upgrade_real(
 	ignored: &HashSet<&str>,
 	auto_merge: AutoMerge,
 ) {
-	match auto_merge {
-		AutoMerge::low => {
-			eprintln!("Note: --auto-merge is set to low, but this feature is not yet functional.");
-		}
-		AutoMerge::medium => {
-			eprintln!(
-				"Note: --auto-merge is set to medium, but this feature is not yet functional."
-			);
-		}
-		AutoMerge::off => {}
-	}
-
 	let alpm = new_alpm_wrapper();
 	let (outdated, nonexistent) =
 		calculate_upgrade(&*alpm, devel, ignored).expect("calculating upgrade failed");
@@ -88,7 +76,7 @@ pub fn upgrade_real(
 			let user_input = terminal_util::read_line_lowercase();
 			if &user_input == "o" {
 				let outdated: Vec<String> = outdated.iter().map(|o| o.0.to_string()).collect();
-				action_install::install(&outdated, rua_paths, false, true);
+				action_install::install(&outdated, rua_paths, false, true, auto_merge);
 				break;
 			} else if &user_input == "x" {
 				break;

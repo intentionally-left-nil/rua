@@ -21,6 +21,7 @@ mod wrapped;
 use crate::print_package_info::info;
 use crate::wrapped::shellcheck;
 use cli_args::Action;
+use cli_args::AutoMerge;
 use cli_args::CliArgs;
 use std::collections::HashSet;
 use std::process::exit;
@@ -39,7 +40,7 @@ fn main() {
 			target,
 		} => {
 			let paths = rua_paths::RuaPaths::initialize_paths();
-			action_install::install(target, &paths, *offline, *asdeps);
+			action_install::install(target, &paths, *offline, *asdeps, AutoMerge::off);
 		}
 		Action::Builddir {
 			offline,

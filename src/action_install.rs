@@ -1,5 +1,6 @@
 use crate::alpm_wrapper::new_alpm_wrapper;
 use crate::aur_rpc_utils;
+use crate::cli_args::AutoMerge;
 use crate::pacman;
 use crate::reviewing;
 use crate::rua_paths::RuaPaths;
@@ -17,7 +18,13 @@ use std::fs;
 use std::fs::ReadDir;
 use std::path::PathBuf;
 
-pub fn install(targets: &[String], rua_paths: &RuaPaths, is_offline: bool, asdeps: bool) {
+pub fn install(
+	targets: &[String],
+	rua_paths: &RuaPaths,
+	is_offline: bool,
+	asdeps: bool,
+	auto_merge: AutoMerge,
+) {
 	let alpm = new_alpm_wrapper();
 	let (split_to_raur, pacman_deps, split_to_depth) =
 		aur_rpc_utils::recursive_info(targets, &*alpm).unwrap_or_else(|err| {
@@ -45,7 +52,7 @@ pub fn install(targets: &[String], rua_paths: &RuaPaths, is_offline: bool, asdep
 		fs::create_dir_all(&dir).unwrap_or_else(|err| {
 			panic!("Failed to create repository dir for {}, {}", pkgbase, err)
 		});
-		reviewing::review_repo(&dir, pkgbase, rua_paths);
+		reviewing::review_repo(&dir, pkgbase, rua_paths, auto_merge);
 	}
 	pacman::ensure_pacman_packages_installed(pacman_deps);
 	install_all(
