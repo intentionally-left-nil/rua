@@ -81,15 +81,37 @@ fn download_srcinfo_sources(dir: &str, rua_paths: &RuaPaths) {
 		.expect("Failed to clean up PKGBUILD.static");
 }
 
-pub fn generate_srcinfo(dir: &str, rua_paths: &RuaPaths) -> Result<Srcinfo, String> {
+pub fn generate_srcinfo(dir: &str) -> Result<Srcinfo, String> {
+	// Since the PKGBUILD is potentially untrusted at this point, we are using a custom sandbox for this function
+	// No user customization is permitted. --unshare-all is passed in, along with clearing out environment variables
 	debug!("Getting srcinfo in directory {}", dir);
-	let mut command = jail_for_makepkg(rua_paths, dir, "/tmp");
-	command.arg("--unshare-net");
-	command.args(["--ro-bind", dir, dir]);
+	let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+	let mut command = Command::new("bwrap");
 	command
-		.arg("makepkg")
-		.arg("--holdver")
-		.arg("--printsrcinfo");
+		// Process isolation
+		.args(["--new-session", "--die-with-parent"])
+		// Unshare everything, including network
+		.arg("--unshare-all")
+		// Read-only view of the entire root filesystem
+		.args(["--ro-bind", "/", "/"])
+		// Fresh /dev, /proc, /tmp
+		.args(["--dev", "/dev"])
+		.args(["--proc", "/proc"])
+		.args(["--tmpfs", "/tmp"])
+		// Hide the user's home directory entirely
+		.args(["--tmpfs", &home])
+		// Read-only access to the directory containing the PKGBUILD
+		.args(["--ro-bind", dir, dir])
+		.args(["--", "makepkg", "--holdver", "--printsrcinfo"])
+		.current_dir(dir)
+		.env_clear()
+		.env("PATH", "/usr/bin:/bin")
+		.env("HOME", &home)
+		.env("PKGDEST", "/tmp")
+		.env("SRCDEST", "/tmp")
+		.env("SRCPKGDEST", "/tmp")
+		.env("LOGDEST", "/tmp")
+		.env("BUILDDIR", "/tmp");
 
 	let output = command
 		.output()

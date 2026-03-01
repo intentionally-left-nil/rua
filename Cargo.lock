@@ -1634,6 +1634,7 @@ dependencies = [
  "serde_json",
  "srcinfo",
  "tar",
+ "tempfile",
  "termize",
  "uname",
  "xz2",

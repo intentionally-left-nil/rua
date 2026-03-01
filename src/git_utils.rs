@@ -72,6 +72,22 @@ pub fn merge_upstream(dir: &Path, rua_paths: &RuaPaths) {
 		.ok();
 }
 
+pub fn show_file(dir: &Path, git_ref: &str, file_path: &str, rua_paths: &RuaPaths) -> String {
+	let refpath = format!("{}:{}", git_ref, file_path);
+	let output = git(dir, rua_paths)
+		.args(["show", &refpath])
+		.output()
+		.unwrap_or_else(|e| panic!("Failed to run git show {}: {}", refpath, e));
+	assert!(
+		output.status.success(),
+		"git show {} failed (exit code {:?}): {}",
+		refpath,
+		output.status.code(),
+		String::from_utf8_lossy(&output.stderr)
+	);
+	String::from_utf8(output.stdout).expect("git show returned non-UTF8 content")
+}
+
 fn silently_run_panic_if_error(args: &[&str], dir: &Path, rua_paths: &RuaPaths) {
 	let command = git(dir, rua_paths)
 		.args(args)
