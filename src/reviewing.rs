@@ -1,6 +1,7 @@
 use crate::cli_args::AutoMerge;
 use crate::git_utils;
 use crate::rua_paths::RuaPaths;
+use crate::srcinfo_eval;
 use crate::terminal_util;
 use crate::wrapped;
 use colored::Colorize;
@@ -18,11 +19,11 @@ enum SrcinfoValidation {
 	GenerationFailed(String),
 }
 
-fn validate_upstream_srcinfo(dir: &Path, rua_paths: &RuaPaths) -> SrcinfoValidation {
-	let aur_srcinfo_text = git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
-	let aur_srcinfo = Srcinfo::from_str(&aur_srcinfo_text)
-		.unwrap_or_else(|e| panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e));
-
+fn validate_upstream_srcinfo(
+	upstream_srcinfo: &Srcinfo,
+	dir: &Path,
+	rua_paths: &RuaPaths,
+) -> SrcinfoValidation {
 	let pkgbuild_text = git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
 
 	let tmp_dir = tempfile::TempDir::new().expect("Failed to create temp directory");
@@ -41,7 +42,7 @@ fn validate_upstream_srcinfo(dir: &Path, rua_paths: &RuaPaths) -> SrcinfoValidat
 		Err(e) => return SrcinfoValidation::GenerationFailed(e),
 	};
 
-	if aur_srcinfo == generated_srcinfo {
+	if *upstream_srcinfo == generated_srcinfo {
 		SrcinfoValidation::Matches
 	} else {
 		SrcinfoValidation::Mismatch
@@ -82,32 +83,81 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 	}
 
 	if auto_merge != AutoMerge::off {
-		match validate_upstream_srcinfo(dir, rua_paths) {
-			SrcinfoValidation::GenerationFailed(reason) => {
-				eprintln!(
-					"Auto-merge: could not generate SRCINFO for {}, skipping auto-merge.\n{}",
-					pkgbase, reason
-				);
-			}
-			SrcinfoValidation::Mismatch => {
-				eprintln!(
-					"Auto-merge: upstream .SRCINFO does not match the locally generated SRCINFO \
-					for {}.",
-					pkgbase
-				);
-				eprintln!("Would you like to proceed anyway? [y/N]");
-				let input = terminal_util::read_line_lowercase();
-				if input != "y" {
-					eprintln!("Aborting.");
-					std::process::exit(1);
+		if git_utils::is_upstream_merged(dir, rua_paths) {
+			eprintln!(
+				"Auto-merge: upstream is already merged for {}, skipping auto-merge evaluation.",
+				pkgbase
+			);
+		} else {
+			let upstream_srcinfo_text =
+				git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
+			let upstream_srcinfo = Srcinfo::from_str(&upstream_srcinfo_text).unwrap_or_else(|e| {
+				panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e)
+			});
+
+			match validate_upstream_srcinfo(&upstream_srcinfo, dir, rua_paths) {
+				SrcinfoValidation::GenerationFailed(reason) => {
+					eprintln!(
+						"Auto-merge: could not generate SRCINFO for {}, skipping auto-merge.\n{}",
+						pkgbase, reason
+					);
 				}
-			}
-			SrcinfoValidation::Matches => {
-				eprintln!(
-					"Auto-merge: SRCINFO matches for {}. \
-					Note: auto-merge is not yet fully implemented, proceeding with manual review.",
-					pkgbase
-				);
+				SrcinfoValidation::Mismatch => {
+					eprintln!(
+						"Auto-merge: upstream .SRCINFO does not match the locally generated SRCINFO \
+					for {}.",
+						pkgbase
+					);
+					eprintln!("Would you like to proceed anyway? [y/N]");
+					let input = terminal_util::read_line_lowercase();
+					if input != "y" {
+						eprintln!("Aborting.");
+						std::process::exit(1);
+					}
+				}
+				SrcinfoValidation::Matches => {
+					match git_utils::try_show_file(dir, "HEAD", ".SRCINFO", rua_paths) {
+						None => {
+							eprintln!(
+								"Auto-merge: no previous .SRCINFO found in HEAD for {}, \
+								skipping auto-merge.",
+								pkgbase
+							);
+						}
+						Some(prev_text) => {
+							let previous_srcinfo =
+								Srcinfo::from_str(&prev_text).unwrap_or_else(|e| {
+									panic!(
+										"Failed to parse previous .SRCINFO from HEAD for {}:\n{}",
+										pkgbase, e
+									)
+								});
+							let evaluations = srcinfo_eval::evaluate_srcinfo_diff(
+								&previous_srcinfo,
+								&upstream_srcinfo,
+							);
+							eprintln!(
+								"Auto-merge: risk evaluations for {} ({} check{}):",
+								pkgbase,
+								evaluations.len(),
+								if evaluations.len() == 1 { "" } else { "s" }
+							);
+							for eval in &evaluations {
+								eprintln!(
+									"  [{}{}] {:?}: {}",
+									format!("{:?}", eval.risk).to_uppercase(),
+									if eval.modified { " MODIFIED" } else { "" },
+									eval.name,
+									eval.description,
+								);
+							}
+							eprintln!(
+								"Note: auto-merge decision is not yet fully implemented, \
+								proceeding with manual review."
+							);
+						}
+					}
+				}
 			}
 		}
 	}

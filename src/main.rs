@@ -13,6 +13,7 @@ mod print_package_table;
 mod reviewing;
 mod rua_environment;
 mod rua_paths;
+mod srcinfo_eval;
 mod srcinfo_to_pkgbuild;
 mod tar_check;
 mod terminal_util;
