@@ -88,6 +88,23 @@ pub fn show_file(dir: &Path, git_ref: &str, file_path: &str, rua_paths: &RuaPath
 	String::from_utf8(output.stdout).expect("git show returned non-UTF8 content")
 }
 
+pub fn try_show_file(
+	dir: &Path,
+	git_ref: &str,
+	file_path: &str,
+	rua_paths: &RuaPaths,
+) -> Option<String> {
+	let refpath = format!("{}:{}", git_ref, file_path);
+	let output = git(dir, rua_paths)
+		.args(["show", &refpath])
+		.output()
+		.unwrap_or_else(|e| panic!("Failed to run git show {}: {}", refpath, e));
+	if !output.status.success() {
+		return None;
+	}
+	Some(String::from_utf8(output.stdout).expect("git show returned non-UTF8 content"))
+}
+
 fn silently_run_panic_if_error(args: &[&str], dir: &Path, rua_paths: &RuaPaths) {
 	let command = git(dir, rua_paths)
 		.args(args)
