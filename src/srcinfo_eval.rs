@@ -5,7 +5,6 @@ use srcinfo::{Package, Srcinfo};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RiskLevel {
 	Low,
-	#[allow(dead_code)]
 	Medium,
 	High,
 }
@@ -21,6 +20,9 @@ pub enum EvaluationName {
 	Provides,
 	Conflicts,
 	Replaces,
+	Pkgver,
+	Pkgrel,
+	UnexplainedUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +40,10 @@ pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Eval
 		evaluate_epoch(previous, proposed, pkgbase.clone()),
 		evaluate_makedepends(previous, proposed, pkgbase.clone()),
 		evaluate_checkdepends(previous, proposed, pkgbase.clone()),
-		evaluate_package_set(previous, proposed, pkgbase),
+		evaluate_package_set(previous, proposed, pkgbase.clone()),
+		evaluate_pkgver(previous, proposed, pkgbase.clone()),
+		evaluate_pkgrel(previous, proposed, pkgbase.clone()),
+		evaluate_unexplained_update(previous, proposed, pkgbase),
 	];
 
 	let prev_pkgs: HashMap<String, &Package> = previous
@@ -94,6 +99,305 @@ fn evaluate_epoch(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Ev
 
 fn epoch_display(epoch: Option<&str>) -> &str {
 	epoch.unwrap_or("None")
+}
+
+/// Compares two version strings segment-by-segment, splitting on '.'.
+/// Each segment is compared numerically if both parse as u64, otherwise lexicographically.
+/// Returns Ordering::Less if a < b, Ordering::Greater if a > b, Ordering::Equal otherwise.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+	let a_parts: Vec<&str> = a.split('.').collect();
+	let b_parts: Vec<&str> = b.split('.').collect();
+	let len = a_parts.len().max(b_parts.len());
+	for i in 0..len {
+		let a_seg = a_parts.get(i).copied().unwrap_or("0");
+		let b_seg = b_parts.get(i).copied().unwrap_or("0");
+		let ord = match (a_seg.parse::<u64>(), b_seg.parse::<u64>()) {
+			(Ok(a_n), Ok(b_n)) => a_n.cmp(&b_n),
+			_ => a_seg.cmp(b_seg),
+		};
+		if ord != std::cmp::Ordering::Equal {
+			return ord;
+		}
+	}
+	std::cmp::Ordering::Equal
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PkgverStyle {
+	/// Single numeric segment with 8+ digits, e.g. `20260308`
+	Timestamp,
+	/// Dotted version where the first segment has 4+ digits, e.g. `2026.03.08`
+	Date,
+	/// Dotted version with a short numeric first segment (< 4 digits) and 2+ segments,
+	/// e.g. `3.14`, `1.9.3`, `1.0.0_rc1`, `1.0.0.alpha`
+	Semver,
+	/// A single short numeric value, e.g. `42`
+	SingleNumber,
+	/// Anything else, e.g. `r123`
+	Other,
+}
+
+fn detect_pkgver_style(s: &str) -> PkgverStyle {
+	let parts: Vec<&str> = s.split('.').collect();
+	match parts.as_slice() {
+		[] => PkgverStyle::Other,
+		[single] => {
+			if single.chars().all(|c| c.is_ascii_digit()) {
+				if single.len() >= 8 {
+					PkgverStyle::Timestamp
+				} else {
+					PkgverStyle::SingleNumber
+				}
+			} else {
+				PkgverStyle::Other
+			}
+		}
+		[first, ..] => {
+			if first.len() >= 4 && first.chars().all(|c| c.is_ascii_digit()) {
+				PkgverStyle::Date
+			} else if first.len() < 4 && first.chars().all(|c| c.is_ascii_digit()) {
+				PkgverStyle::Semver
+			} else {
+				PkgverStyle::Other
+			}
+		}
+	}
+}
+
+fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Evaluation {
+	let prev_ver = &previous.base.pkgver;
+	let new_ver = &proposed.base.pkgver;
+
+	if prev_ver == new_ver {
+		return Evaluation {
+			name: EvaluationName::Pkgver,
+			pkgname,
+			description: format!("pkgver unchanged ({})", prev_ver),
+			risk: RiskLevel::Low,
+			modified: false,
+		};
+	}
+
+	if new_ver.is_empty()
+		|| !new_ver
+			.chars()
+			.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+	{
+		return Evaluation {
+			name: EvaluationName::Pkgver,
+			pkgname,
+			description: format!(
+				"pkgver changed from {} to {} — new value contains invalid characters (only [a-zA-Z0-9._] allowed)",
+				prev_ver, new_ver
+			),
+			risk: RiskLevel::High,
+			modified: true,
+		};
+	}
+
+	let prev_style = detect_pkgver_style(prev_ver);
+	let new_style = detect_pkgver_style(new_ver);
+	let style_changed = prev_style != new_style;
+
+	match new_style {
+		PkgverStyle::Timestamp | PkgverStyle::Date | PkgverStyle::SingleNumber => {
+			if compare_versions(new_ver, prev_ver) == std::cmp::Ordering::Less {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
+					risk: RiskLevel::High,
+					modified: true,
+				};
+			}
+			if style_changed {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!(
+						"pkgver changed from {} to {} — version style changed ({:?} to {:?})",
+						prev_ver, new_ver, prev_style, new_style
+					),
+					risk: RiskLevel::Medium,
+					modified: true,
+				};
+			}
+			Evaluation {
+				name: EvaluationName::Pkgver,
+				pkgname,
+				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
+				risk: RiskLevel::Low,
+				modified: true,
+			}
+		}
+		PkgverStyle::Semver => {
+			if compare_versions(new_ver, prev_ver) == std::cmp::Ordering::Less {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
+					risk: RiskLevel::High,
+					modified: true,
+				};
+			}
+			// Major version bump: only meaningful if the previous version is also semver
+			let prev_major = prev_ver
+				.split('.')
+				.next()
+				.and_then(|s| s.parse::<u64>().ok());
+			let new_major = new_ver
+				.split('.')
+				.next()
+				.and_then(|s| s.parse::<u64>().ok());
+			if let (Some(p), Some(n)) = (prev_major, new_major) {
+				if n > p {
+					return Evaluation {
+						name: EvaluationName::Pkgver,
+						pkgname,
+						description: format!(
+							"pkgver major version bumped from {} to {}",
+							prev_ver, new_ver
+						),
+						risk: RiskLevel::Medium,
+						modified: true,
+					};
+				}
+			}
+			if style_changed {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!(
+						"pkgver changed from {} to {} — version style changed ({:?} to {:?})",
+						prev_ver, new_ver, prev_style, new_style
+					),
+					risk: RiskLevel::Medium,
+					modified: true,
+				};
+			}
+			Evaluation {
+				name: EvaluationName::Pkgver,
+				pkgname,
+				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
+				risk: RiskLevel::Low,
+				modified: true,
+			}
+		}
+		PkgverStyle::Other => {
+			if new_ver.as_str() < prev_ver.as_str() {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
+					risk: RiskLevel::High,
+					modified: true,
+				};
+			}
+			if style_changed {
+				return Evaluation {
+					name: EvaluationName::Pkgver,
+					pkgname,
+					description: format!(
+						"pkgver changed from {} to {} — version style changed ({:?} to {:?})",
+						prev_ver, new_ver, prev_style, new_style
+					),
+					risk: RiskLevel::Medium,
+					modified: true,
+				};
+			}
+			Evaluation {
+				name: EvaluationName::Pkgver,
+				pkgname,
+				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
+				risk: RiskLevel::Low,
+				modified: true,
+			}
+		}
+	}
+}
+
+fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Evaluation {
+	let prev_rel = &previous.base.pkgrel;
+	let new_rel = &proposed.base.pkgrel;
+
+	if prev_rel == new_rel {
+		return Evaluation {
+			name: EvaluationName::Pkgrel,
+			pkgname,
+			description: format!("pkgrel unchanged ({})", prev_rel),
+			risk: RiskLevel::Low,
+			modified: false,
+		};
+	}
+
+	let prev_int = prev_rel.parse::<u64>().ok();
+	let new_int = new_rel.parse::<u64>().ok();
+
+	// Not a positive integer (includes 0, floats like 1.1, non-numeric)
+	match new_int {
+		None | Some(0) => {
+			return Evaluation {
+				name: EvaluationName::Pkgrel,
+				pkgname,
+				description: format!(
+					"pkgrel changed from {} to {} — new value is not a positive integer",
+					prev_rel, new_rel
+				),
+				risk: RiskLevel::Medium,
+				modified: true,
+			};
+		}
+		_ => {}
+	}
+
+	// Both are positive integers — check for decrease
+	if let (Some(p), Some(n)) = (prev_int, new_int) {
+		if n < p {
+			return Evaluation {
+				name: EvaluationName::Pkgrel,
+				pkgname,
+				description: format!("pkgrel decreased from {} to {}", prev_rel, new_rel),
+				risk: RiskLevel::High,
+				modified: true,
+			};
+		}
+	}
+
+	Evaluation {
+		name: EvaluationName::Pkgrel,
+		pkgname,
+		description: format!("pkgrel changed from {} to {}", prev_rel, new_rel),
+		risk: RiskLevel::Low,
+		modified: true,
+	}
+}
+
+fn evaluate_unexplained_update(
+	previous: &Srcinfo,
+	proposed: &Srcinfo,
+	pkgname: String,
+) -> Evaluation {
+	let ver_unchanged = previous.base.pkgver == proposed.base.pkgver;
+	let rel_unchanged = previous.base.pkgrel == proposed.base.pkgrel;
+
+	if ver_unchanged && rel_unchanged {
+		Evaluation {
+			name: EvaluationName::UnexplainedUpdate,
+			pkgname,
+			description: "pkgver and pkgrel are both unchanged — unusual for a PKGBUILD update"
+				.to_string(),
+			risk: RiskLevel::Medium,
+			modified: true,
+		}
+	} else {
+		Evaluation {
+			name: EvaluationName::UnexplainedUpdate,
+			pkgname,
+			description: "pkgver or pkgrel changed, as expected".to_string(),
+			risk: RiskLevel::Low,
+			modified: false,
+		}
+	}
 }
 
 fn diff_description(added: &[String], removed: &[String]) -> String {
@@ -400,6 +704,22 @@ pkgname = example
 pkgname = example-extra
 \tpkgdesc = An example extra package
 ";
+
+	#[test]
+	fn test_detect_pkgver_style() {
+		assert_eq!(detect_pkgver_style("20260308"), PkgverStyle::Timestamp);
+		assert_eq!(detect_pkgver_style("20250101"), PkgverStyle::Timestamp);
+		assert_eq!(detect_pkgver_style("2026.03.08"), PkgverStyle::Date);
+		assert_eq!(detect_pkgver_style("2025.12.01"), PkgverStyle::Date);
+		assert_eq!(detect_pkgver_style("1.0.0"), PkgverStyle::Semver);
+		assert_eq!(detect_pkgver_style("3.14"), PkgverStyle::Semver);
+		assert_eq!(detect_pkgver_style("4.0"), PkgverStyle::Semver);
+		assert_eq!(detect_pkgver_style("42"), PkgverStyle::SingleNumber);
+		assert_eq!(detect_pkgver_style("1"), PkgverStyle::SingleNumber);
+		assert_eq!(detect_pkgver_style("r123"), PkgverStyle::Other);
+		assert_eq!(detect_pkgver_style("1.0.0_rc1"), PkgverStyle::Semver);
+		assert_eq!(detect_pkgver_style("1.0.0.alpha"), PkgverStyle::Semver);
+	}
 
 	#[test]
 	fn test_package_set() {
@@ -727,6 +1047,346 @@ pkgname = example-extra
 			let proposed = with_modification(case.proposed);
 			let evals = evaluate_srcinfo_diff(&previous, &proposed);
 			let eval = find_eval(&evals, EvaluationName::Replaces, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_pkgver() {
+		struct PkgverCase {
+			name: &'static str,
+			previous: fn(&mut Srcinfo),
+			proposed: fn(&mut Srcinfo),
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases = [
+			PkgverCase {
+				name: "unchanged",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			PkgverCase {
+				name: "normal_bump",
+				previous: |_| {},
+				proposed: |s| s.base.pkgver = "1.0.1".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "hyphen_invalid",
+				previous: |_| {},
+				proposed: |s| s.base.pkgver = "1.0.0-beta".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "space_invalid",
+				previous: |_| {},
+				proposed: |s| s.base.pkgver = "1.0 0".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "decrease",
+				previous: |s| s.base.pkgver = "2.0.0".to_string(),
+				proposed: |s| s.base.pkgver = "1.0.0".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "minor_decrease",
+				previous: |s| s.base.pkgver = "1.5.0".to_string(),
+				proposed: |s| s.base.pkgver = "1.4.9".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "date_bump",
+				previous: |s| s.base.pkgver = "20260101".to_string(),
+				proposed: |s| s.base.pkgver = "20260308".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "dotted_date_bump",
+				previous: |s| s.base.pkgver = "2025.12.01".to_string(),
+				proposed: |s| s.base.pkgver = "2026.03.08".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "underscore_valid",
+				previous: |_| {},
+				proposed: |s| s.base.pkgver = "1.0.0_rc1".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "two_segment_bump",
+				previous: |s| s.base.pkgver = "3.13".to_string(),
+				proposed: |s| s.base.pkgver = "3.14".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "two_segment_major_bump",
+				previous: |s| s.base.pkgver = "3.14".to_string(),
+				proposed: |s| s.base.pkgver = "4.0".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgverCase {
+				name: "two_segment_decrease",
+				previous: |s| s.base.pkgver = "3.14".to_string(),
+				proposed: |s| s.base.pkgver = "3.13".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "two_segment_major_decrease",
+				previous: |s| s.base.pkgver = "4.0".to_string(),
+				proposed: |s| s.base.pkgver = "3.14".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "three_segment_major_bump",
+				previous: |s| s.base.pkgver = "1.9.3".to_string(),
+				proposed: |s| s.base.pkgver = "2.0.0".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgverCase {
+				name: "three_segment_minor_bump_not_medium",
+				previous: |s| s.base.pkgver = "1.9.3".to_string(),
+				proposed: |s| s.base.pkgver = "1.10.0".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "date_major_bump_not_medium",
+				previous: |s| s.base.pkgver = "2025.12.01".to_string(),
+				proposed: |s| s.base.pkgver = "2026.03.08".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "other_style_increase",
+				previous: |s| s.base.pkgver = "r123".to_string(),
+				proposed: |s| s.base.pkgver = "r124".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "other_style_decrease",
+				previous: |s| s.base.pkgver = "r124".to_string(),
+				proposed: |s| s.base.pkgver = "r123".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "timestamp_bump",
+				previous: |s| s.base.pkgver = "20250101".to_string(),
+				proposed: |s| s.base.pkgver = "20260308".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "timestamp_decrease",
+				previous: |s| s.base.pkgver = "20260308".to_string(),
+				proposed: |s| s.base.pkgver = "20250101".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "single_number_bump",
+				previous: |s| s.base.pkgver = "41".to_string(),
+				proposed: |s| s.base.pkgver = "42".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgverCase {
+				name: "single_number_decrease",
+				previous: |s| s.base.pkgver = "42".to_string(),
+				proposed: |s| s.base.pkgver = "41".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "style_change_semver_to_date",
+				previous: |s| s.base.pkgver = "1.9.3".to_string(),
+				proposed: |s| s.base.pkgver = "2026.03.08".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgverCase {
+				name: "style_change_semver_to_timestamp",
+				previous: |s| s.base.pkgver = "1.9.3".to_string(),
+				proposed: |s| s.base.pkgver = "20260308".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgverCase {
+				name: "style_change_semver_to_other",
+				previous: |s| s.base.pkgver = "1.9.3".to_string(),
+				proposed: |s| s.base.pkgver = "r200".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgverCase {
+				name: "style_change_date_to_semver",
+				previous: |s| s.base.pkgver = "2026.03.08".to_string(),
+				proposed: |s| s.base.pkgver = "1.0.0".to_string(),
+				// version also decreases, so High takes priority
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgverCase {
+				name: "style_change_timestamp_to_semver",
+				previous: |s| s.base.pkgver = "20260308".to_string(),
+				proposed: |s| s.base.pkgver = "1.0.0".to_string(),
+				// version also decreases, so High takes priority
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Pkgver, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_pkgrel() {
+		struct PkgrelCase {
+			name: &'static str,
+			previous: fn(&mut Srcinfo),
+			proposed: fn(&mut Srcinfo),
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases = [
+			PkgrelCase {
+				name: "unchanged",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			PkgrelCase {
+				name: "normal_increment",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "2".to_string(),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "zero_invalid",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "0".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "float_like",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "1.1".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "non_numeric",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "abc".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "negative",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "-1".to_string(),
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "decrease",
+				previous: |s| s.base.pkgrel = "5".to_string(),
+				proposed: |s| s.base.pkgrel = "2".to_string(),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Pkgrel, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_unexplained_update() {
+		struct UnexplainedCase {
+			name: &'static str,
+			previous: fn(&mut Srcinfo),
+			proposed: fn(&mut Srcinfo),
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases = [
+			UnexplainedCase {
+				name: "both_unchanged",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			UnexplainedCase {
+				name: "pkgver_changed",
+				previous: |_| {},
+				proposed: |s| s.base.pkgver = "1.0.1".to_string(),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			UnexplainedCase {
+				name: "pkgrel_changed",
+				previous: |_| {},
+				proposed: |s| s.base.pkgrel = "2".to_string(),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			UnexplainedCase {
+				name: "both_changed",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.pkgver = "2.0.0".to_string();
+					s.base.pkgrel = "1".to_string();
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::UnexplainedUpdate, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
 		}
