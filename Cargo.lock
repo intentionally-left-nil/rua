@@ -1637,6 +1637,7 @@ dependencies = [
  "tempfile",
  "termize",
  "uname",
+ "url",
  "xz2",
 ]
 
