@@ -144,9 +144,10 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 							);
 							for eval in &evaluations {
 								eprintln!(
-									"  [{}{}] {:?}: {}",
+									"  [{}{}] {}/{:?}: {}",
 									format!("{:?}", eval.risk).to_uppercase(),
 									if eval.modified { " MODIFIED" } else { "" },
+									eval.pkgname,
 									eval.name,
 									eval.description,
 								);
