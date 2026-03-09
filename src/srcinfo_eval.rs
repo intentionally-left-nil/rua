@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use srcinfo::{Package, Srcinfo};
+use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RiskLevel {
@@ -23,6 +24,10 @@ pub enum EvaluationName {
 	Pkgver,
 	Pkgrel,
 	UnexplainedUpdate,
+	Install,
+	Url,
+	Pkgdesc,
+	Changelog,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +69,10 @@ pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Eval
 			evals.push(evaluate_provides(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_conflicts(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_replaces(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_install(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_url(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_pkgdesc(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_changelog(prev_pkg, proposed_pkg, pkgname.clone()));
 		}
 	}
 
@@ -561,6 +570,111 @@ fn evaluate_replaces(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String
 		&prev_pkg.replaces,
 		&proposed_pkg.replaces,
 		RiskLevel::High,
+	)
+}
+
+fn optional_field_display(val: &Option<String>) -> &str {
+	val.as_deref().unwrap_or("None")
+}
+
+fn evaluate_optional_string_field(
+	name: EvaluationName,
+	pkgname: String,
+	field_name: &str,
+	prev: &Option<String>,
+	proposed: &Option<String>,
+	risk_if_modified: RiskLevel,
+) -> Evaluation {
+	if prev == proposed {
+		Evaluation {
+			name,
+			pkgname,
+			description: format!(
+				"{} unchanged ({})",
+				field_name,
+				optional_field_display(prev)
+			),
+			risk: RiskLevel::Low,
+			modified: false,
+		}
+	} else {
+		Evaluation {
+			name,
+			pkgname,
+			description: format!(
+				"{} changed from '{}' to '{}'",
+				field_name,
+				optional_field_display(prev),
+				optional_field_display(proposed)
+			),
+			risk: risk_if_modified,
+			modified: true,
+		}
+	}
+}
+
+fn evaluate_install(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_optional_string_field(
+		EvaluationName::Install,
+		pkgname,
+		"install",
+		&prev_pkg.install,
+		&proposed_pkg.install,
+		RiskLevel::High,
+	)
+}
+
+fn evaluate_url(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	let prev = &prev_pkg.url;
+	let proposed = &proposed_pkg.url;
+
+	let proposed_invalid = proposed
+		.as_deref()
+		.map(|s| Url::parse(s).is_err())
+		.unwrap_or(false);
+
+	if proposed_invalid {
+		return Evaluation {
+			name: EvaluationName::Url,
+			pkgname,
+			description: format!(
+				"url '{}' is not a valid URI",
+				optional_field_display(proposed)
+			),
+			risk: RiskLevel::High,
+			modified: prev != proposed,
+		};
+	}
+
+	evaluate_optional_string_field(
+		EvaluationName::Url,
+		pkgname,
+		"url",
+		prev,
+		proposed,
+		RiskLevel::High,
+	)
+}
+
+fn evaluate_pkgdesc(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_optional_string_field(
+		EvaluationName::Pkgdesc,
+		pkgname,
+		"pkgdesc",
+		&prev_pkg.pkgdesc,
+		&proposed_pkg.pkgdesc,
+		RiskLevel::Low,
+	)
+}
+
+fn evaluate_changelog(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_optional_string_field(
+		EvaluationName::Changelog,
+		pkgname,
+		"changelog",
+		&prev_pkg.changelog,
+		&proposed_pkg.changelog,
+		RiskLevel::Low,
 	)
 }
 
@@ -1387,6 +1501,213 @@ pkgname = example-extra
 			let proposed = with_modification(case.proposed);
 			let evals = evaluate_srcinfo_diff(&previous, &proposed);
 			let eval = find_eval(&evals, EvaluationName::UnexplainedUpdate, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_install() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_none",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].install = Some("pkg.install".to_string()),
+				proposed: |s| s.pkgs[0].install = Some("pkg.install".to_string()),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].install = Some("pkg.install".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].install = Some("pkg.install".to_string()),
+				proposed: |_| {},
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].install = Some("old.install".to_string()),
+				proposed: |s| s.pkgs[0].install = Some("new.install".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Install, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_url() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_none",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				proposed: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				proposed: |_| {},
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				proposed: |s| s.pkgs[0].url = Some("https://other.com".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "invalid_url_unchanged",
+				previous: |s| s.pkgs[0].url = Some("not-a-url".to_string()),
+				proposed: |s| s.pkgs[0].url = Some("not-a-url".to_string()),
+				risk: RiskLevel::High,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "invalid_url_changed",
+				previous: |s| s.pkgs[0].url = Some("https://example.com".to_string()),
+				proposed: |s| s.pkgs[0].url = Some("not-a-url".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "no_scheme_slashes",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].url = Some("example.com".to_string()),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Url, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_pkgdesc() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].pkgdesc = Some("Old description".to_string()),
+				proposed: |s| s.pkgs[0].pkgdesc = Some("New description".to_string()),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |s| s.pkgs[0].pkgdesc = None,
+				proposed: |s| s.pkgs[0].pkgdesc = Some("New description".to_string()),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].pkgdesc = Some("Old description".to_string()),
+				proposed: |s| s.pkgs[0].pkgdesc = None,
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Pkgdesc, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_changelog() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_none",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].changelog = Some("ChangeLog".to_string()),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].changelog = Some("ChangeLog".to_string()),
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].changelog = Some("ChangeLog".to_string()),
+				proposed: |s| s.pkgs[0].changelog = Some("CHANGES".to_string()),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Changelog, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
 		}
