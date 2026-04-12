@@ -32,6 +32,7 @@ pub enum EvaluationName {
 	License,
 	Groups,
 	Backup,
+	Options,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,7 @@ pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Eval
 			evals.push(evaluate_license(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_groups(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_backup(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_options(prev_pkg, proposed_pkg, pkgname.clone()));
 		}
 	}
 
@@ -728,6 +730,57 @@ fn evaluate_backup(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) 
 		proposed_pkg.backup.clone(),
 		RiskLevel::Low,
 	)
+}
+
+fn option_risk(option: &str) -> RiskLevel {
+	let base = option.strip_prefix('!').unwrap_or(option);
+	match base {
+		"staticlibs" | "makeflags" | "buildflags" => RiskLevel::High,
+		"lto" | "debug" | "emptydirs" => RiskLevel::Medium,
+		_ => RiskLevel::Low,
+	}
+}
+
+fn max_risk(a: RiskLevel, b: RiskLevel) -> RiskLevel {
+	match (a, b) {
+		(RiskLevel::High, _) | (_, RiskLevel::High) => RiskLevel::High,
+		(RiskLevel::Medium, _) | (_, RiskLevel::Medium) => RiskLevel::Medium,
+		_ => RiskLevel::Low,
+	}
+}
+
+fn evaluate_options(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	let prev: HashSet<String> = prev_pkg.options.iter().cloned().collect();
+	let new: HashSet<String> = proposed_pkg.options.iter().cloned().collect();
+
+	let mut added: Vec<String> = new.difference(&prev).cloned().collect();
+	let mut removed: Vec<String> = prev.difference(&new).cloned().collect();
+	added.sort_unstable();
+	removed.sort_unstable();
+
+	if added.is_empty() && removed.is_empty() {
+		return Evaluation {
+			name: EvaluationName::Options,
+			pkgname,
+			description: "options unchanged".to_string(),
+			risk: RiskLevel::Low,
+			modified: false,
+		};
+	}
+
+	let risk = added
+		.iter()
+		.chain(removed.iter())
+		.map(|opt| option_risk(opt))
+		.fold(RiskLevel::Low, max_risk);
+
+	Evaluation {
+		name: EvaluationName::Options,
+		pkgname,
+		description: format!("options changed ({})", diff_description(&added, &removed)),
+		risk,
+		modified: true,
+	}
 }
 
 #[cfg(test)]
@@ -2008,6 +2061,147 @@ pkgname = example-extra
 		assert!(
 			eval.description.contains("etc/bar.conf") && eval.description.contains("etc/foo.conf"),
 			"description should mention both added and removed paths, got: {}",
+			eval.description
+		);
+	}
+
+	#[test]
+	fn test_options() {
+		let cases = [
+			// Unchanged
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].options = vec!["strip".to_string(), "docs".to_string()],
+				proposed: |s| s.pkgs[0].options = vec!["strip".to_string(), "docs".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "reordered_no_change",
+				previous: |s| s.pkgs[0].options = vec!["strip".to_string(), "docs".to_string()],
+				proposed: |s| s.pkgs[0].options = vec!["docs".to_string(), "strip".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			// Low-risk changes
+			ArrayFieldCase {
+				name: "add_low_risk",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["!strip".to_string()],
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "remove_low_risk",
+				previous: |s| s.pkgs[0].options = vec!["zipman".to_string()],
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			// Medium-risk changes
+			ArrayFieldCase {
+				name: "add_lto",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["lto".to_string()],
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_debug",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["debug".to_string()],
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_emptydirs",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["emptydirs".to_string()],
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_negated_medium",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["!lto".to_string()],
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+			// High-risk changes
+			ArrayFieldCase {
+				name: "add_buildflags",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["buildflags".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_negated_buildflags",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["!buildflags".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_makeflags",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["makeflags".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "add_staticlibs",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["staticlibs".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Max-risk wins when multiple options change
+			ArrayFieldCase {
+				name: "mixed_low_and_high",
+				previous: |_| {},
+				proposed: |s| {
+					s.pkgs[0].options = vec!["!strip".to_string(), "!buildflags".to_string()]
+				},
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "mixed_low_and_medium",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].options = vec!["docs".to_string(), "lto".to_string()],
+				risk: RiskLevel::Medium,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Options, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+
+		// Description lists all changed options
+		let previous =
+			with_modification(|s| s.pkgs[0].options = vec!["lto".to_string(), "strip".to_string()]);
+		let proposed = with_modification(|s| {
+			s.pkgs[0].options = vec!["strip".to_string(), "!buildflags".to_string()]
+		});
+		let evals = evaluate_srcinfo_diff(&previous, &proposed);
+		let eval = find_eval(&evals, EvaluationName::Options, "example");
+		assert!(
+			eval.description.contains("!buildflags") && eval.description.contains("lto"),
+			"description should mention added '!buildflags' and removed 'lto', got: {}",
 			eval.description
 		);
 	}
