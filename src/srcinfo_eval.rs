@@ -33,6 +33,7 @@ pub enum EvaluationName {
 	Groups,
 	Backup,
 	Options,
+	ValidPgpKeys,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,7 @@ pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Eval
 		evaluate_epoch(previous, proposed, pkgbase.clone()),
 		evaluate_makedepends(previous, proposed, pkgbase.clone()),
 		evaluate_checkdepends(previous, proposed, pkgbase.clone()),
+		evaluate_valid_pgp_keys(previous, proposed, pkgbase.clone()),
 		evaluate_package_set(previous, proposed, pkgbase.clone()),
 		evaluate_pkgver(previous, proposed, pkgbase.clone()),
 		evaluate_pkgrel(previous, proposed, pkgbase.clone()),
@@ -526,6 +528,17 @@ fn evaluate_checkdepends(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String
 		&previous.base.checkdepends,
 		&proposed.base.checkdepends,
 		RiskLevel::Medium,
+	)
+}
+
+fn evaluate_valid_pgp_keys(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::ValidPgpKeys,
+		pkgname,
+		"validpgpkeys",
+		previous.base.valid_pgp_keys.clone(),
+		proposed.base.valid_pgp_keys.clone(),
+		RiskLevel::High,
 	)
 }
 
@@ -1108,6 +1121,85 @@ pkgname = example-extra
 			let proposed = with_modification(case.proposed);
 			let evals = evaluate_srcinfo_diff(&previous, &proposed);
 			let eval = find_eval(&evals, EvaluationName::CheckDepends, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_valid_pgp_keys() {
+		const FP_A: &str = "ABCDEF1234567890ABCDEF1234567890ABCDEF12";
+		const FP_B: &str = "1111111111111111111111111111111111111111";
+
+		struct ValidPgpKeysCase {
+			name: &'static str,
+			previous_keys: &'static [&'static str],
+			proposed_keys: &'static [&'static str],
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases = [
+			ValidPgpKeysCase {
+				name: "unchanged_empty",
+				previous_keys: &[],
+				proposed_keys: &[],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ValidPgpKeysCase {
+				name: "unchanged_same",
+				previous_keys: &[FP_A],
+				proposed_keys: &[FP_A],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ValidPgpKeysCase {
+				name: "reordered_no_change",
+				previous_keys: &[FP_A, FP_B],
+				proposed_keys: &[FP_B, FP_A],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ValidPgpKeysCase {
+				name: "key_added",
+				previous_keys: &[],
+				proposed_keys: &[FP_A],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ValidPgpKeysCase {
+				name: "key_removed",
+				previous_keys: &[FP_A],
+				proposed_keys: &[],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ValidPgpKeysCase {
+				name: "key_replaced",
+				previous_keys: &[FP_A],
+				proposed_keys: &[FP_B],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ValidPgpKeysCase {
+				name: "key_added_to_existing",
+				previous_keys: &[FP_A],
+				proposed_keys: &[FP_A, FP_B],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(|s| {
+				s.base.valid_pgp_keys = case.previous_keys.iter().map(|k| k.to_string()).collect();
+			});
+			let proposed = with_modification(|s| {
+				s.base.valid_pgp_keys = case.proposed_keys.iter().map(|k| k.to_string()).collect();
+			});
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::ValidPgpKeys, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
 		}
