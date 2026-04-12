@@ -28,6 +28,10 @@ pub enum EvaluationName {
 	Url,
 	Pkgdesc,
 	Changelog,
+	Arch,
+	License,
+	Groups,
+	Backup,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,10 @@ pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Eval
 			evals.push(evaluate_url(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_pkgdesc(prev_pkg, proposed_pkg, pkgname.clone()));
 			evals.push(evaluate_changelog(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_arch(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_license(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_groups(prev_pkg, proposed_pkg, pkgname.clone()));
+			evals.push(evaluate_backup(prev_pkg, proposed_pkg, pkgname.clone()));
 		}
 	}
 
@@ -674,6 +682,50 @@ fn evaluate_changelog(prev_pkg: &Package, proposed_pkg: &Package, pkgname: Strin
 		"changelog",
 		&prev_pkg.changelog,
 		&proposed_pkg.changelog,
+		RiskLevel::Low,
+	)
+}
+
+fn evaluate_arch(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::Arch,
+		pkgname,
+		"arch",
+		prev_pkg.arch.clone(),
+		proposed_pkg.arch.clone(),
+		RiskLevel::High,
+	)
+}
+
+fn evaluate_license(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::License,
+		pkgname,
+		"license",
+		prev_pkg.license.clone(),
+		proposed_pkg.license.clone(),
+		RiskLevel::High,
+	)
+}
+
+fn evaluate_groups(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::Groups,
+		pkgname,
+		"groups",
+		prev_pkg.groups.clone(),
+		proposed_pkg.groups.clone(),
+		RiskLevel::High,
+	)
+}
+
+fn evaluate_backup(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::Backup,
+		pkgname,
+		"backup",
+		prev_pkg.backup.clone(),
+		proposed_pkg.backup.clone(),
 		RiskLevel::Low,
 	)
 }
@@ -1711,5 +1763,252 @@ pkgname = example-extra
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
 		}
+	}
+
+	#[test]
+	fn test_arch() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].arch = vec!["x86_64".to_string()],
+				proposed: |s| s.pkgs[0].arch = vec!["x86_64".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "reordered_no_change",
+				previous: |s| s.pkgs[0].arch = vec!["x86_64".to_string(), "aarch64".to_string()],
+				proposed: |s| s.pkgs[0].arch = vec!["aarch64".to_string(), "x86_64".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |s| s.pkgs[0].arch = vec!["x86_64".to_string()],
+				proposed: |s| s.pkgs[0].arch = vec!["x86_64".to_string(), "aarch64".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].arch = vec!["x86_64".to_string(), "aarch64".to_string()],
+				proposed: |s| s.pkgs[0].arch = vec!["x86_64".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].arch = vec!["x86_64".to_string()],
+				proposed: |s| s.pkgs[0].arch = vec!["aarch64".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Arch, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_license() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].license = vec!["MIT".to_string()],
+				proposed: |s| s.pkgs[0].license = vec!["MIT".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "reordered_no_change",
+				previous: |s| s.pkgs[0].license = vec!["MIT".to_string(), "Apache-2.0".to_string()],
+				proposed: |s| s.pkgs[0].license = vec!["Apache-2.0".to_string(), "MIT".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |s| s.pkgs[0].license = vec!["MIT".to_string()],
+				proposed: |s| s.pkgs[0].license = vec!["MIT".to_string(), "Apache-2.0".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].license = vec!["MIT".to_string(), "Apache-2.0".to_string()],
+				proposed: |s| s.pkgs[0].license = vec!["MIT".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].license = vec!["MIT".to_string()],
+				proposed: |s| s.pkgs[0].license = vec!["GPL-3.0".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::License, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_groups() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].groups = vec!["base-devel".to_string()],
+				proposed: |s| s.pkgs[0].groups = vec!["base-devel".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "reordered_no_change",
+				previous: |s| {
+					s.pkgs[0].groups = vec!["base-devel".to_string(), "extra".to_string()]
+				},
+				proposed: |s| {
+					s.pkgs[0].groups = vec!["extra".to_string(), "base-devel".to_string()]
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].groups = vec!["base-devel".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].groups = vec!["base-devel".to_string()],
+				proposed: |_| {},
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].groups = vec!["base-devel".to_string()],
+				proposed: |s| s.pkgs[0].groups = vec!["extra".to_string()],
+				risk: RiskLevel::High,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Groups, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_backup() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_same",
+				previous: |s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()],
+				proposed: |s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "reordered_no_change",
+				previous: |s| {
+					s.pkgs[0].backup = vec!["etc/foo.conf".to_string(), "etc/bar.conf".to_string()]
+				},
+				proposed: |s| {
+					s.pkgs[0].backup = vec!["etc/bar.conf".to_string(), "etc/foo.conf".to_string()]
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "added",
+				previous: |_| {},
+				proposed: |s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()],
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "removed",
+				previous: |s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()],
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "changed",
+				previous: |s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()],
+				proposed: |s| s.pkgs[0].backup = vec!["etc/bar.conf".to_string()],
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let eval = find_eval(&evals, EvaluationName::Backup, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+
+		// Verify description contains diff details when modified
+		let previous = with_modification(|s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()]);
+		let proposed = with_modification(|s| s.pkgs[0].backup = vec!["etc/bar.conf".to_string()]);
+		let evals = evaluate_srcinfo_diff(&previous, &proposed);
+		let eval = find_eval(&evals, EvaluationName::Backup, "example");
+		assert!(
+			eval.description.contains("etc/bar.conf") && eval.description.contains("etc/foo.conf"),
+			"description should mention both added and removed paths, got: {}",
+			eval.description
+		);
 	}
 }
