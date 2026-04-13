@@ -11,15 +11,11 @@ use srcinfo::Srcinfo;
 use std::path::Path;
 use std::str::FromStr;
 
-/// How auto-merge should behave for a run.
 pub enum AutoMergeMode {
-	/// Auto-merge is disabled (`--no-auto-merge`).
 	Disabled,
-	/// Auto-merge is enabled with the given threshold. Config `auto_merge = false`
-	/// entries are respected.
+	/// Config `auto_merge = false` entries are respected.
 	Enabled(RiskLevel),
-	/// Auto-merge is force-enabled (`--auto-merge`): config `auto_merge = false`
-	/// entries are ignored. Overrides both per-package and any future global config.
+	/// Ignores `auto_merge = false` config entries; equivalent to `--auto-merge` flag.
 	Forced(RiskLevel),
 }
 
@@ -56,7 +52,7 @@ fn validate_upstream_srcinfo(
 	}
 }
 
-fn print_evaluation(eval: &Evaluation, passes: bool, cli_threshold: RiskLevel) {
+pub(crate) fn print_evaluation(eval: &Evaluation, passes: bool, cli_threshold: RiskLevel) {
 	let risk_str = format!("{:?}", eval.risk).to_uppercase();
 	let modified_str = if eval.modified { " MODIFIED" } else { "" };
 
@@ -83,6 +79,74 @@ fn print_evaluation(eval: &Evaluation, passes: bool, cli_threshold: RiskLevel) {
 			"  [{}{}] {}/{:?}: {}",
 			risk_str, modified_str, eval.pkgname, eval.name, eval.description,
 		);
+	}
+}
+
+pub(crate) enum EvalPairOutcome {
+	Success(Vec<Evaluation>),
+	/// Normal for early commits that pre-date SRCINFO.
+	AbsentSrcinfo,
+	/// `.SRCINFO` exists but failed to parse — indicates corruption or tampering.
+	MalformedSrcinfo(String),
+}
+
+pub(crate) fn evaluate_srcinfo_texts(
+	old_srcinfo_text: &str,
+	new_srcinfo_text: &str,
+	old_pkgbuild: Option<&str>,
+	new_pkgbuild: Option<&str>,
+	config: &RuaConfig,
+) -> Result<Vec<Evaluation>, String> {
+	let old_srcinfo = Srcinfo::from_str(old_srcinfo_text)
+		.map_err(|e| format!("failed to parse old .SRCINFO: {}", e))?;
+	let new_srcinfo = Srcinfo::from_str(new_srcinfo_text)
+		.map_err(|e| format!("failed to parse new .SRCINFO: {}", e))?;
+
+	let pkgbase = &new_srcinfo.base.pkgbase;
+	let patterns = config.compiled_source_patterns(pkgbase);
+
+	let mut evaluations =
+		srcinfo_eval::evaluate_srcinfo_diff(&old_srcinfo, &new_srcinfo, &patterns);
+
+	if let (Some(old_pb), Some(new_pb)) = (old_pkgbuild, new_pkgbuild) {
+		evaluations.extend(pkgbuild_eval::evaluate_pkgbuild_diff(
+			old_pb, new_pb, pkgbase,
+		));
+	}
+
+	Ok(evaluations)
+}
+
+/// Single source of truth for evaluation logic shared between `try_auto_merge`
+/// and `action_evaluate`. Both callers stay in sync by only changing this function.
+pub(crate) fn evaluate_ref_pair(
+	dir: &Path,
+	old_ref: &str,
+	new_ref: &str,
+	config: &RuaConfig,
+	rua_paths: &RuaPaths,
+) -> EvalPairOutcome {
+	let old_srcinfo_text = match git_utils::try_show_file(dir, old_ref, ".SRCINFO", rua_paths) {
+		Some(t) => t,
+		None => return EvalPairOutcome::AbsentSrcinfo,
+	};
+	let new_srcinfo_text = match git_utils::try_show_file(dir, new_ref, ".SRCINFO", rua_paths) {
+		Some(t) => t,
+		None => return EvalPairOutcome::AbsentSrcinfo,
+	};
+
+	let old_pkgbuild = git_utils::try_show_file(dir, old_ref, "PKGBUILD", rua_paths);
+	let new_pkgbuild = git_utils::try_show_file(dir, new_ref, "PKGBUILD", rua_paths);
+
+	match evaluate_srcinfo_texts(
+		&old_srcinfo_text,
+		&new_srcinfo_text,
+		old_pkgbuild.as_deref(),
+		new_pkgbuild.as_deref(),
+		config,
+	) {
+		Ok(evals) => EvalPairOutcome::Success(evals),
+		Err(e) => EvalPairOutcome::MalformedSrcinfo(e),
 	}
 }
 
@@ -138,12 +202,10 @@ pub fn try_auto_merge(
 		return false;
 	}
 
-	let patterns = config.compiled_source_patterns(pkgbase);
-
+	// Security check specific to live auto-merge; skipped in history replay.
 	let upstream_srcinfo_text = git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
 	let upstream_srcinfo = Srcinfo::from_str(&upstream_srcinfo_text)
 		.unwrap_or_else(|e| panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e));
-
 	let upstream_pkgbuild = git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
 
 	match validate_upstream_srcinfo(&upstream_srcinfo, &upstream_pkgbuild) {
@@ -161,42 +223,30 @@ pub fn try_auto_merge(
 			);
 			eprintln!("Would you like to proceed anyway? [y/N]");
 			if terminal_util::read_line_lowercase() != "y" {
-				// Return false rather than exiting: the caller will fall through to the
-				// manual review loop so the user can inspect the mismatch themselves.
+				// Caller falls through to manual review so the user can inspect the mismatch.
 				return false;
 			}
 		}
 		SrcinfoValidation::Matches => {}
 	}
 
-	let prev_srcinfo_text = match git_utils::try_show_file(dir, "HEAD", ".SRCINFO", rua_paths) {
-		Some(t) => t,
-		None => {
+	let evaluations = match evaluate_ref_pair(dir, "HEAD", "upstream/master", &config, rua_paths) {
+		EvalPairOutcome::Success(evals) => evals,
+		EvalPairOutcome::AbsentSrcinfo => {
 			eprintln!(
 				"Auto-merge: no previous .SRCINFO found in HEAD for {}, skipping auto-merge.",
 				pkgbase
 			);
 			return false;
 		}
+		EvalPairOutcome::MalformedSrcinfo(err) => {
+			eprintln!(
+				"Auto-merge: .SRCINFO parse error for {}, skipping auto-merge: {}",
+				pkgbase, err
+			);
+			return false;
+		}
 	};
-
-	let previous_srcinfo = Srcinfo::from_str(&prev_srcinfo_text).unwrap_or_else(|e| {
-		panic!(
-			"Failed to parse previous .SRCINFO from HEAD for {}:\n{}",
-			pkgbase, e
-		)
-	});
-
-	let mut evaluations =
-		srcinfo_eval::evaluate_srcinfo_diff(&previous_srcinfo, &upstream_srcinfo, &patterns);
-
-	if let Some(prev_pkgbuild) = git_utils::try_show_file(dir, "HEAD", "PKGBUILD", rua_paths) {
-		evaluations.extend(pkgbuild_eval::evaluate_pkgbuild_diff(
-			&prev_pkgbuild,
-			&upstream_pkgbuild,
-			&upstream_srcinfo.base.pkgbase,
-		));
-	}
 
 	eprintln!(
 		"Auto-merge: risk evaluations for {} ({} check{}):",
@@ -380,5 +430,85 @@ mod tests {
 			"anypkg",
 			RiskLevel::Medium
 		));
+	}
+
+	const VALID_SRCINFO: &str = "\
+pkgbase = testpkg
+\tpkgver = 1.0.0
+\tpkgrel = 1
+\tarch = x86_64
+
+pkgname = testpkg
+";
+
+	#[test]
+	fn evaluate_srcinfo_texts_valid_inputs_return_ok() {
+		let result = evaluate_srcinfo_texts(
+			VALID_SRCINFO,
+			VALID_SRCINFO,
+			None,
+			None,
+			&RuaConfig::default(),
+		);
+		assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+	}
+
+	#[test]
+	fn evaluate_srcinfo_texts_malformed_old_returns_err_mentioning_old() {
+		let result = evaluate_srcinfo_texts(
+			"this is not valid srcinfo !!!",
+			VALID_SRCINFO,
+			None,
+			None,
+			&RuaConfig::default(),
+		);
+		let err = result.expect_err("expected Err for malformed old .SRCINFO");
+		assert!(
+			err.contains("old .SRCINFO"),
+			"error message should mention 'old .SRCINFO', got: {}",
+			err
+		);
+	}
+
+	#[test]
+	fn evaluate_srcinfo_texts_malformed_new_returns_err_mentioning_new() {
+		let result = evaluate_srcinfo_texts(
+			VALID_SRCINFO,
+			"this is not valid srcinfo !!!",
+			None,
+			None,
+			&RuaConfig::default(),
+		);
+		let err = result.expect_err("expected Err for malformed new .SRCINFO");
+		assert!(
+			err.contains("new .SRCINFO"),
+			"error message should mention 'new .SRCINFO', got: {}",
+			err
+		);
+	}
+
+	#[test]
+	fn evaluate_srcinfo_texts_missing_pkgbuild_still_produces_srcinfo_evals() {
+		let result = evaluate_srcinfo_texts(
+			VALID_SRCINFO,
+			VALID_SRCINFO,
+			None,
+			None,
+			&RuaConfig::default(),
+		);
+		let evals = result.expect("expected Ok with no PKGBUILDs");
+		assert!(
+			!evals.is_empty(),
+			"should still have SRCINFO evaluations even without PKGBUILDs"
+		);
+		assert!(
+			!evals.iter().any(|e| matches!(
+				e.name,
+				EvaluationName::PkgbuildFunction
+					| EvaluationName::PkgbuildCustomVariable
+					| EvaluationName::PkgbuildBareCode
+			)),
+			"should have no PKGBUILD evaluations when PKGBUILDs are absent"
+		);
 	}
 }
