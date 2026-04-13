@@ -1,0 +1,31 @@
+# RUA configuration file.
+# Copy this file to ~/.config/rua/config.toml for it to take effect.
+#
+# Source URL patterns for auto-merge risk evaluation.
+# A source URL change is considered low risk if:
+#   - Both the old and new URLs match the same pattern.
+#   - The pattern's `(?P<version>...)` group in the new URL matches pkgver exactly.
+#   - All other named groups are identical between old and new URL.
+# Patterns without a `version` group are domain-level trust overrides:
+#   if both URLs match, the change is low risk regardless of what changed.
+#
+# Per-package overrides can be added under [packages.<pkgbase>].
+
+# Global patterns applied to all packages:
+sources = [
+    # GitHub archive tarballs
+    'https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/(refs/tags/)?v?(?P<version>[^/]+)\.tar\.gz',
+    'https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/(refs/tags/)?v?(?P<version>[^/]+)\.tar\.xz',
+    'https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/(refs/tags/)?v?(?P<version>[^/]+)\.tar\.bz2',
+    'https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/(refs/tags/)?v?(?P<version>[^/]+)\.zip',
+    # GitHub release assets (filename intentionally unconstrained — it often embeds the version)
+    'https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/v?(?P<version>[^/]+)/[^/]+',
+    # GitLab archive (filename intentionally unconstrained)
+    'https://gitlab\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/-/archive/v?(?P<version>[^/]+)/[^/]+',
+]
+
+# Example per-package override:
+#[packages.firefox]
+#sources = [
+#    'https://archive\.mozilla\.org/pub/firefox/releases/(?P<version>[^/]+)/[^/]+',
+#]

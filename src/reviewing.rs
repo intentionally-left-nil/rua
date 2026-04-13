@@ -1,4 +1,5 @@
 use crate::cli_args::AutoMerge;
+use crate::config::RuaConfig;
 use crate::git_utils;
 use crate::rua_paths::RuaPaths;
 use crate::srcinfo_eval;
@@ -89,6 +90,8 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 				pkgbase
 			);
 		} else {
+			let config = RuaConfig::load(&rua_paths.config_file);
+			let patterns = config.compiled_source_patterns(pkgbase);
 			let upstream_srcinfo_text =
 				git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
 			let upstream_srcinfo = Srcinfo::from_str(&upstream_srcinfo_text).unwrap_or_else(|e| {
@@ -135,6 +138,7 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 							let evaluations = srcinfo_eval::evaluate_srcinfo_diff(
 								&previous_srcinfo,
 								&upstream_srcinfo,
+								&patterns,
 							);
 							eprintln!(
 								"Auto-merge: risk evaluations for {} ({} check{}):",
