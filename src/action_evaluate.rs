@@ -4,6 +4,13 @@ use crate::evaluation::RiskLevel;
 use crate::git_utils;
 use crate::rua_paths::RuaPaths;
 
+fn resolve_range(range: Option<&str>) -> String {
+	match range {
+		None => "upstream/master".to_string(),
+		Some(r) => r.replace("HEAD", "upstream/master"),
+	}
+}
+
 pub fn action_evaluate(
 	pkgbase: &str,
 	threshold: RiskLevel,
@@ -20,8 +27,8 @@ Run 'rua install {}' first to clone the repo.",
 		std::process::exit(1);
 	}
 
-	let range_or_ref = range.unwrap_or("upstream/master");
-	let commits = git_utils::list_commits(&dir, range_or_ref, rua_paths);
+	let range_or_ref = resolve_range(range);
+	let commits = git_utils::list_commits(&dir, &range_or_ref, rua_paths);
 
 	if commits.len() < 2 {
 		eprintln!(
@@ -83,4 +90,45 @@ Run 'rua install {}' first to clone the repo.",
 ({} skipped, missing .SRCINFO).",
 		pkgbase, would_merge, evaluated, skipped
 	);
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_resolve_range_none_defaults_to_upstream_master() {
+		assert_eq!(resolve_range(None), "upstream/master");
+	}
+
+	#[test]
+	fn test_resolve_range_head_replaced() {
+		assert_eq!(
+			resolve_range(Some("HEAD~3..HEAD")),
+			"upstream/master~3..upstream/master"
+		);
+	}
+
+	#[test]
+	fn test_resolve_range_bare_head() {
+		assert_eq!(resolve_range(Some("HEAD")), "upstream/master");
+	}
+
+	#[test]
+	fn test_resolve_range_head_suffix_only() {
+		assert_eq!(resolve_range(Some("HEAD~5")), "upstream/master~5");
+	}
+
+	#[test]
+	fn test_resolve_range_no_head_unchanged() {
+		assert_eq!(
+			resolve_range(Some("upstream/master~3..upstream/master")),
+			"upstream/master~3..upstream/master"
+		);
+	}
+
+	#[test]
+	fn test_resolve_range_sha_unchanged() {
+		assert_eq!(resolve_range(Some("abc123..def456")), "abc123..def456");
+	}
 }
