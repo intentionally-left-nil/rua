@@ -81,6 +81,20 @@ pub enum Action {
 		/// Archive to check
 		target: PathBuf,
 	},
+	/// Replay evaluations over the git history of a locally-cloned AUR package repo
+	Evaluate {
+		/// AUR package name (must already be cloned via install/upgrade)
+		target: String,
+
+		/// Risk level to treat as auto-mergeable. Accepts: low, medium, high.
+		#[arg(long, value_enum, default_value_t = AutoMergeThreshold::Low, ignore_case = true)]
+		threshold: AutoMergeThreshold,
+
+		/// Git rev range passed to `git rev-list` (e.g. abc123..def456).
+		/// Defaults to the full upstream/master history.
+		#[arg(long)]
+		range: Option<String>,
+	},
 	/// Upgrade AUR packages by name, or all packages if package names are not provided.
 	/// To ignore packages, add them to IgnorePkg in /etc/pacman.conf
 	Upgrade {

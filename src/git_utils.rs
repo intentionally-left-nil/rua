@@ -57,6 +57,31 @@ pub fn rev_parse_head(dir: &Path, rua_paths: &RuaPaths) -> Option<String> {
 	Some(rev.trim().to_string())
 }
 
+/// Returns commit SHAs reachable from `range_or_ref` in chronological order
+/// (oldest first). `range_or_ref` is passed directly to `git rev-list --reverse`
+/// and can be any git revision expression: a branch name (`upstream/master`),
+/// a range (`abc123..def456`), or a single SHA.
+pub fn list_commits(dir: &Path, range_or_ref: &str, rua_paths: &RuaPaths) -> Vec<String> {
+	let output = git(dir, rua_paths)
+		.args(["rev-list", "--reverse", range_or_ref])
+		.output()
+		.unwrap_or_else(|e| panic!("Failed to run git rev-list: {}", e));
+	if !output.status.success() {
+		eprintln!(
+			"Error: git rev-list failed for range '{}': {}",
+			range_or_ref,
+			String::from_utf8_lossy(&output.stderr).trim(),
+		);
+		std::process::exit(1);
+	}
+	let stdout = String::from_utf8(output.stdout).expect("git rev-list returned non-UTF8 content");
+	stdout
+		.lines()
+		.filter(|l| !l.is_empty())
+		.map(str::to_owned)
+		.collect()
+}
+
 pub fn merge_upstream(dir: &Path, rua_paths: &RuaPaths) {
 	let email = "rua@local";
 	let name = "RUA";
