@@ -249,7 +249,7 @@ fn install_all(
 				let is_pkg = path
 					.file_name()
 					.and_then(|n| n.to_str())
-					.map_or(false, |n| n.ends_with(&rua_paths.makepkg_pkgext));
+					.is_some_and(|n| n.ends_with(&rua_paths.makepkg_pkgext));
 				if is_pkg {
 					files_to_install.push((split.to_string(), path));
 				}
