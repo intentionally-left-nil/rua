@@ -29,3 +29,52 @@ sources = [
 #sources = [
 #    'https://archive\.mozilla\.org/pub/firefox/releases/(?P<version>[^/]+)/[^/]+',
 #]
+
+# ---------------------------------------------------------------------------
+# Evaluation thresholds for auto-merge
+#
+# By default, rua auto-merges updates where every evaluation is low risk.
+# Use --auto-merge off to disable auto-merge entirely, or --auto-merge medium
+# to also allow medium-risk evaluations.
+#
+# The config lets you adjust this per-evaluation or per-package:
+#
+#   [evaluations.<name>].threshold          — global override for one evaluation
+#   [packages.<pkgbase>].auto_merge         — set false to disable for a package
+#   [packages.<pkgbase>.evaluations.<name>].threshold — most specific override
+#
+# Resolution order for per-evaluation thresholds (first match wins):
+#   1. packages.<pkgbase>.evaluations.<name>.threshold
+#   2. evaluations.<name>.threshold
+#   3. --auto-merge CLI flag (default: low)
+#
+# Threshold values: "low", "medium", "high"
+# An evaluation passes when its risk <= threshold.
+#
+# To disable auto-merge entirely: pass --auto-merge off on the command line,
+# or set auto_merge = false for individual packages in the config.
+#
+# Available evaluation names (snake_case):
+#   srcinfo: epoch, package_set, check_depends, make_depends, depends,
+#            opt_depends, provides, conflicts, replaces, pkgver, pkgrel,
+#            unexplained_update, install, url, pkgdesc, changelog, arch,
+#            license, groups, backup, options, valid_pgp_keys, no_extract,
+#            insecure_checksum, checksum_consistency, source, checksum_skip
+#   pkgbuild: pkgbuild_function, pkgbuild_custom_variable, pkgbuild_bare_code
+# ---------------------------------------------------------------------------
+
+# Example: globally allow install-script changes (normally high risk)
+#[evaluations.install]
+#threshold = "high"
+
+# Example: tighten pkgbuild function changes to only allow low risk
+#[evaluations.pkgbuild_function]
+#threshold = "low"
+
+# Example: disable auto-merge entirely for a sensitive package
+#[packages.sudo]
+#auto_merge = false
+
+# Example: trust source URL changes for a specific package
+#[packages.firefox.evaluations.source]
+#threshold = "high"

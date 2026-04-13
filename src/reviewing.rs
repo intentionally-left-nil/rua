@@ -1,54 +1,14 @@
-use crate::cli_args::AutoMerge;
-use crate::config::RuaConfig;
+use crate::auto_merge;
+use crate::auto_merge::AutoMergeMode;
 use crate::git_utils;
-use crate::pkgbuild_eval;
 use crate::rua_paths::RuaPaths;
-use crate::srcinfo_eval;
 use crate::terminal_util;
 use crate::wrapped;
 use colored::Colorize;
 use log::debug;
-use srcinfo::Srcinfo;
 use std::path::Path;
-use std::str::FromStr;
 
-enum SrcinfoValidation {
-	/// SRCINFO was generated successfully and matches upstream.
-	Matches,
-	/// SRCINFO was generated successfully but does not match upstream.
-	Mismatch,
-	/// SRCINFO could not be generated (e.g. bwrap/makepkg failure).
-	GenerationFailed(String),
-}
-
-fn validate_upstream_srcinfo(
-	upstream_srcinfo: &Srcinfo,
-	upstream_pkgbuild: &str,
-) -> SrcinfoValidation {
-	let tmp_dir = tempfile::TempDir::new().expect("Failed to create temp directory");
-
-	let pkgbuild_path = tmp_dir.path().join("PKGBUILD");
-	std::fs::write(&pkgbuild_path, upstream_pkgbuild)
-		.expect("Failed to write PKGBUILD to temp directory");
-
-	let tmp_dir_str = tmp_dir
-		.path()
-		.to_str()
-		.expect("Temp directory path is not valid UTF-8");
-
-	let generated_srcinfo = match wrapped::generate_srcinfo(tmp_dir_str) {
-		Ok(s) => s,
-		Err(e) => return SrcinfoValidation::GenerationFailed(e),
-	};
-
-	if *upstream_srcinfo == generated_srcinfo {
-		SrcinfoValidation::Matches
-	} else {
-		SrcinfoValidation::Mismatch
-	}
-}
-
-pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: AutoMerge) {
+pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, mode: &AutoMergeMode) {
 	let mut dir_contents = dir.read_dir().unwrap_or_else(|err| {
 		panic!(
 			"{}:{} Failed to read directory for reviewing, {}",
@@ -81,102 +41,8 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 		eprintln!();
 	}
 
-	if auto_merge != AutoMerge::off {
-		if git_utils::is_upstream_merged(dir, rua_paths) {
-			eprintln!(
-				"Auto-merge: upstream is already merged for {}, skipping auto-merge evaluation.",
-				pkgbase
-			);
-		} else {
-			let config = RuaConfig::load(&rua_paths.config_file);
-			let patterns = config.compiled_source_patterns(pkgbase);
-			let upstream_srcinfo_text =
-				git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
-			let upstream_srcinfo = Srcinfo::from_str(&upstream_srcinfo_text).unwrap_or_else(|e| {
-				panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e)
-			});
-
-			let upstream_pkgbuild =
-				git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
-
-			match validate_upstream_srcinfo(&upstream_srcinfo, &upstream_pkgbuild) {
-				SrcinfoValidation::GenerationFailed(reason) => {
-					eprintln!(
-						"Auto-merge: could not generate SRCINFO for {}, skipping auto-merge.\n{}",
-						pkgbase, reason
-					);
-				}
-				SrcinfoValidation::Mismatch => {
-					eprintln!(
-						"Auto-merge: upstream .SRCINFO does not match the locally generated SRCINFO \
-					for {}.",
-						pkgbase
-					);
-					eprintln!("Would you like to proceed anyway? [y/N]");
-					let input = terminal_util::read_line_lowercase();
-					if input != "y" {
-						eprintln!("Aborting.");
-						std::process::exit(1);
-					}
-				}
-				SrcinfoValidation::Matches => {
-					match git_utils::try_show_file(dir, "HEAD", ".SRCINFO", rua_paths) {
-						None => {
-							eprintln!(
-								"Auto-merge: no previous .SRCINFO found in HEAD for {}, \
-								skipping auto-merge.",
-								pkgbase
-							);
-						}
-						Some(prev_text) => {
-							let previous_srcinfo =
-								Srcinfo::from_str(&prev_text).unwrap_or_else(|e| {
-									panic!(
-										"Failed to parse previous .SRCINFO from HEAD for {}:\n{}",
-										pkgbase, e
-									)
-								});
-							let mut evaluations = srcinfo_eval::evaluate_srcinfo_diff(
-								&previous_srcinfo,
-								&upstream_srcinfo,
-								&patterns,
-							);
-
-							if let Some(prev_pkgbuild) =
-								git_utils::try_show_file(dir, "HEAD", "PKGBUILD", rua_paths)
-							{
-								evaluations.extend(pkgbuild_eval::evaluate_pkgbuild_diff(
-									&prev_pkgbuild,
-									&upstream_pkgbuild,
-									&upstream_srcinfo.base.pkgbase,
-								));
-							}
-
-							eprintln!(
-								"Auto-merge: risk evaluations for {} ({} check{}):",
-								pkgbase,
-								evaluations.len(),
-								if evaluations.len() == 1 { "" } else { "s" }
-							);
-							for eval in &evaluations {
-								eprintln!(
-									"  [{}{}] {}/{:?}: {}",
-									format!("{:?}", eval.risk).to_uppercase(),
-									if eval.modified { " MODIFIED" } else { "" },
-									eval.pkgname,
-									eval.name,
-									eval.description,
-								);
-							}
-							eprintln!(
-								"Note: auto-merge decision is not yet fully implemented, \
-								proceeding with manual review."
-							);
-						}
-					}
-				}
-			}
-		}
+	if auto_merge::try_auto_merge(dir, pkgbase, rua_paths, mode) {
+		return;
 	}
 
 	loop {
