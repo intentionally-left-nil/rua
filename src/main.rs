@@ -1,4 +1,5 @@
 mod action_builddir;
+mod action_evaluate;
 mod action_install;
 mod action_search;
 mod action_upgrade;
@@ -75,6 +76,19 @@ fn main() {
 				target.to_str().expect("target is not valid UTF-8"),
 			);
 			eprintln!("Finished checking package: {:?}", target);
+		}
+		Action::Evaluate {
+			target,
+			threshold,
+			range,
+		} => {
+			let paths = rua_paths::RuaPaths::initialize_paths();
+			let threshold_level = match threshold {
+				AutoMergeThreshold::low => RiskLevel::Low,
+				AutoMergeThreshold::medium => RiskLevel::Medium,
+				AutoMergeThreshold::high => RiskLevel::High,
+			};
+			action_evaluate::action_evaluate(target, threshold_level, range.as_deref(), &paths);
 		}
 		Action::Upgrade {
 			devel,

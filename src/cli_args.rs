@@ -115,6 +115,27 @@ Sources are downloaded using .SRCINFO only"
 		target: PathBuf,
 	},
 	#[structopt(
+		about = "Replay evaluations over the git history of a locally-cloned AUR package repo"
+	)]
+	Evaluate {
+		#[structopt(help = "AUR package name (must already be cloned via install/upgrade)")]
+		target: String,
+		#[structopt(
+			long = "threshold",
+			possible_values = &AutoMergeThreshold::variants(),
+			case_insensitive = true,
+			default_value = "low",
+			help = "Risk level to treat as auto-mergeable. Accepts: low, medium, high."
+		)]
+		threshold: AutoMergeThreshold,
+		#[structopt(
+			long = "range",
+			help = "Git rev range passed to `git rev-list` (e.g. abc123..def456). \
+Defaults to the full upstream/master history."
+		)]
+		range: Option<String>,
+	},
+	#[structopt(
 		about = "Upgrade AUR packages by name, or all packages if package names are not provide"
 	)]
 	Upgrade {
