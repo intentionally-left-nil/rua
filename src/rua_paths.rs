@@ -30,6 +30,8 @@ pub struct RuaPaths {
 	pub wrapper_bwrap_script: PathBuf,
 	/// makepkg configuration for PKGEXT
 	pub makepkg_pkgext: String,
+	/// Path to ~/.config/rua/config.toml
+	pub config_file: PathBuf,
 	/// Global lock to prevent concurrent access to project dirs
 	_global_lock: File,
 }
@@ -79,6 +81,10 @@ impl RuaPaths {
 			&dirs.config_dir().join(".system/wrap_args.sh.example"),
 			WRAP_ARGS_EXAMPLE,
 		);
+		overwrite_file(
+			&dirs.config_dir().join(".system/config.toml.example"),
+			CONFIG_TOML_EXAMPLE,
+		);
 		let makepkg_config_loader_path = dirs.config_dir().join(MAKEPKG_CONFIG_LOADER_PATH);
 
 		wrapped::check_bubblewrap_runnable();
@@ -108,6 +114,7 @@ impl RuaPaths {
 			global_checked_tars_dir,
 			wrapper_bwrap_script: dirs.config_dir().join(WRAP_SCRIPT_PATH),
 			makepkg_pkgext: perform_makepkg_checks_and_return_pkgext(&makepkg_config_loader_path),
+			config_file: dirs.config_dir().join("config.toml"),
 			_global_lock: locked_file,
 		}
 	}
@@ -243,6 +250,7 @@ pub const SECCOMP_BPF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/seccomp
 pub const WRAP_SH: &[u8] = include_bytes!("../res/wrapper/security-wrapper.sh");
 pub const WRAP_ARGS_EXAMPLE: &[u8] = include_bytes!("../res/wrapper/wrap_args.sh.example");
 pub const CONFIG_LOADER: &[u8] = include_bytes!("../res/print_makepkg_config.sh");
+pub const CONFIG_TOML_EXAMPLE: &[u8] = include_bytes!("../res/config.toml.example");
 
 pub const WRAP_SCRIPT_PATH: &str = ".system/security-wrapper.sh";
 pub const MAKEPKG_CONFIG_LOADER_PATH: &str = ".system/print_makepkg_config.sh";

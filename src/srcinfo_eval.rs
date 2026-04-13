@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use regex::Regex;
 use srcinfo::{Package, Srcinfo};
 use url::Url;
 
@@ -34,6 +35,11 @@ pub enum EvaluationName {
 	Backup,
 	Options,
 	ValidPgpKeys,
+	NoExtract,
+	InsecureChecksum,
+	ChecksumConsistency,
+	Source,
+	ChecksumSkip,
 }
 
 #[derive(Debug, Clone)]
@@ -45,14 +51,23 @@ pub struct Evaluation {
 	pub modified: bool,
 }
 
-pub fn evaluate_srcinfo_diff(previous: &Srcinfo, proposed: &Srcinfo) -> Vec<Evaluation> {
+pub fn evaluate_srcinfo_diff(
+	previous: &Srcinfo,
+	proposed: &Srcinfo,
+	patterns: &[Regex],
+) -> Vec<Evaluation> {
 	let pkgbase = previous.base.pkgbase.clone();
 	let mut evals = vec![
 		evaluate_epoch(previous, proposed, pkgbase.clone()),
 		evaluate_makedepends(previous, proposed, pkgbase.clone()),
 		evaluate_checkdepends(previous, proposed, pkgbase.clone()),
 		evaluate_valid_pgp_keys(previous, proposed, pkgbase.clone()),
+		evaluate_no_extract(previous, proposed, pkgbase.clone()),
 		evaluate_package_set(previous, proposed, pkgbase.clone()),
+		evaluate_insecure_checksum(previous, proposed, pkgbase.clone()),
+		evaluate_checksum_consistency(previous, proposed, pkgbase.clone()),
+		evaluate_source(previous, proposed, patterns, pkgbase.clone()),
+		evaluate_checksum_skip(previous, proposed, pkgbase.clone()),
 		evaluate_pkgver(previous, proposed, pkgbase.clone()),
 		evaluate_pkgrel(previous, proposed, pkgbase.clone()),
 		evaluate_unexplained_update(previous, proposed, pkgbase),
@@ -542,6 +557,488 @@ fn evaluate_valid_pgp_keys(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Stri
 	)
 }
 
+fn evaluate_no_extract(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Evaluation {
+	evaluate_array_field(
+		EvaluationName::NoExtract,
+		pkgname,
+		"noextract",
+		previous.base.no_extract.clone(),
+		proposed.base.no_extract.clone(),
+		RiskLevel::Low,
+	)
+}
+
+fn has_real_checksums(vecs: &srcinfo::ArchVecs) -> bool {
+	vecs.iter()
+		.flat_map(|av| av.iter())
+		.any(|v| !v.is_empty() && v != "SKIP")
+}
+
+fn evaluate_insecure_checksum(
+	previous: &Srcinfo,
+	proposed: &Srcinfo,
+	pkgname: String,
+) -> Evaluation {
+	let prev_insecure =
+		has_real_checksums(&previous.base.md5sums) || has_real_checksums(&previous.base.sha1sums);
+	let proposed_insecure =
+		has_real_checksums(&proposed.base.md5sums) || has_real_checksums(&proposed.base.sha1sums);
+
+	if proposed_insecure {
+		Evaluation {
+			name: EvaluationName::InsecureChecksum,
+			pkgname,
+			description:
+				"md5sums or sha1sums are used — these algorithms are cryptographically broken"
+					.to_string(),
+			risk: RiskLevel::High,
+			modified: !prev_insecure,
+		}
+	} else {
+		Evaluation {
+			name: EvaluationName::InsecureChecksum,
+			pkgname,
+			description: "No insecure checksums (md5/sha1) present".to_string(),
+			risk: RiskLevel::Low,
+			modified: prev_insecure,
+		}
+	}
+}
+
+// Returns a description of the first checksum array inconsistency found, or
+// `None` if all arrays are consistent (equal length, SKIP at the same indices).
+fn checksums_inconsistency(srcinfo: &Srcinfo) -> Option<String> {
+	let checksum_fields: &[(&str, &srcinfo::ArchVecs)] = &[
+		("sha224sums", &srcinfo.base.sha224sums),
+		("sha256sums", &srcinfo.base.sha256sums),
+		("sha384sums", &srcinfo.base.sha384sums),
+		("sha512sums", &srcinfo.base.sha512sums),
+		("b2sums", &srcinfo.base.b2sums),
+	];
+
+	// Group non-empty (field_name, values) pairs by architecture key.
+	let mut by_arch: BTreeMap<String, Vec<(&str, Vec<String>)>> = BTreeMap::new();
+
+	for (field_name, arch_vecs) in checksum_fields {
+		for arch_vec in arch_vecs.iter() {
+			let values: Vec<String> = arch_vec.iter().map(|s| s.to_string()).collect();
+			if !values.is_empty() {
+				let arch_key = arch_vec.arch().unwrap_or("").to_string();
+				by_arch
+					.entry(arch_key)
+					.or_default()
+					.push((field_name, values));
+			}
+		}
+	}
+
+	for (arch_key, field_entries) in &by_arch {
+		if field_entries.len() < 2 {
+			continue;
+		}
+
+		let arch_label = if arch_key.is_empty() {
+			String::new()
+		} else {
+			format!(" (arch={})", arch_key)
+		};
+
+		let first_len = field_entries[0].1.len();
+		for (field_name, values) in field_entries.iter().skip(1) {
+			if values.len() != first_len {
+				return Some(format!(
+					"checksum arrays{} have different lengths: {} has {} {} but {} has {}",
+					arch_label,
+					field_entries[0].0,
+					first_len,
+					if first_len == 1 { "entry" } else { "entries" },
+					field_name,
+					values.len(),
+				));
+			}
+		}
+
+		for i in 0..first_len {
+			let skip_fields: Vec<&str> = field_entries
+				.iter()
+				.filter(|(_, vals)| vals[i] == "SKIP")
+				.map(|(name, _)| *name)
+				.collect();
+			let non_skip_fields: Vec<&str> = field_entries
+				.iter()
+				.filter(|(_, vals)| vals[i] != "SKIP")
+				.map(|(name, _)| *name)
+				.collect();
+			if !skip_fields.is_empty() && !non_skip_fields.is_empty() {
+				return Some(format!(
+					"SKIP mismatch at source index {}{}: {} use SKIP but {} do not",
+					i,
+					arch_label,
+					skip_fields.join(", "),
+					non_skip_fields.join(", "),
+				));
+			}
+		}
+	}
+
+	None
+}
+
+fn evaluate_checksum_consistency(
+	previous: &Srcinfo,
+	proposed: &Srcinfo,
+	pkgname: String,
+) -> Evaluation {
+	let prev_error = checksums_inconsistency(previous);
+	let proposed_error = checksums_inconsistency(proposed);
+
+	match proposed_error {
+		Some(msg) => Evaluation {
+			name: EvaluationName::ChecksumConsistency,
+			pkgname,
+			description: format!("Checksum arrays are inconsistent: {}", msg),
+			risk: RiskLevel::High,
+			modified: prev_error.is_none(),
+		},
+		None => Evaluation {
+			name: EvaluationName::ChecksumConsistency,
+			pkgname,
+			description: "Checksum arrays are consistent".to_string(),
+			risk: RiskLevel::Low,
+			modified: prev_error.is_some(),
+		},
+	}
+}
+
+fn strip_source_prefix(entry: &str) -> &str {
+	if let Some(pos) = entry.find("::") {
+		&entry[pos + 2..]
+	} else {
+		entry
+	}
+}
+
+/// Returns `true` if `pattern` successfully pairs `old_url` with `new_url`
+/// as a clean version bump:
+///
+/// - Both URLs must match the pattern.
+/// - If the pattern has a `version` named group, the captured value in
+///   `new_url` must equal `new_pkgver` exactly.
+/// - All other named groups must be identical between old and new.
+///
+/// Patterns without a `version` group are treated as domain-level trust
+/// overrides: if both URLs match, the change is considered low risk regardless
+/// of what specifically changed.
+fn matches_source_pattern(pattern: &Regex, old_url: &str, new_url: &str, new_pkgver: &str) -> bool {
+	let old_caps = match pattern.captures(old_url) {
+		Some(c) => c,
+		None => return false,
+	};
+	let new_caps = match pattern.captures(new_url) {
+		Some(c) => c,
+		None => return false,
+	};
+
+	let has_version_group = pattern.capture_names().flatten().any(|n| n == "version");
+
+	if has_version_group {
+		match new_caps.name("version") {
+			Some(v) if v.as_str() == new_pkgver => {}
+			_ => return false,
+		}
+	}
+
+	// All non-version named groups must be identical between old and new.
+	for name in pattern.capture_names().flatten() {
+		if name == "version" {
+			continue;
+		}
+		let old_val = old_caps.name(name).map(|m| m.as_str()).unwrap_or("");
+		let new_val = new_caps.name(name).map(|m| m.as_str()).unwrap_or("");
+		if old_val != new_val {
+			return false;
+		}
+	}
+
+	true
+}
+
+fn source_entries_by_arch(arch_vecs: &srcinfo::ArchVecs) -> BTreeMap<String, Vec<String>> {
+	let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+	for av in arch_vecs.iter() {
+		let key = av.arch().unwrap_or("").to_string();
+		let values: Vec<String> = av.iter().map(|s| s.to_string()).collect();
+		if !values.is_empty() {
+			map.entry(key).or_default().extend(values);
+		}
+	}
+	map
+}
+
+fn evaluate_source(
+	previous: &Srcinfo,
+	proposed: &Srcinfo,
+	patterns: &[Regex],
+	pkgname: String,
+) -> Evaluation {
+	let prev_by_arch = source_entries_by_arch(&previous.base.source);
+	let new_by_arch = source_entries_by_arch(&proposed.base.source);
+
+	let all_arches: BTreeSet<String> = prev_by_arch
+		.keys()
+		.chain(new_by_arch.keys())
+		.cloned()
+		.collect();
+
+	let new_pkgver = &proposed.base.pkgver;
+	let empty: Vec<String> = vec![];
+
+	for arch_key in &all_arches {
+		let prev_vals = prev_by_arch.get(arch_key).unwrap_or(&empty);
+		let new_vals = new_by_arch.get(arch_key).unwrap_or(&empty);
+
+		let arch_label = if arch_key.is_empty() {
+			String::new()
+		} else {
+			format!(" (arch={})", arch_key)
+		};
+
+		if prev_vals.len() != new_vals.len() {
+			return Evaluation {
+				name: EvaluationName::Source,
+				pkgname,
+				description: format!(
+					"Source count changed from {} to {}{}",
+					prev_vals.len(),
+					new_vals.len(),
+					arch_label,
+				),
+				risk: RiskLevel::High,
+				modified: true,
+			};
+		}
+
+		for i in 0..prev_vals.len() {
+			let old_entry = &prev_vals[i];
+			let new_entry = &new_vals[i];
+
+			if old_entry == new_entry {
+				continue;
+			}
+
+			let old_url = strip_source_prefix(old_entry);
+			let new_url = strip_source_prefix(new_entry);
+
+			let matched = patterns
+				.iter()
+				.any(|p| matches_source_pattern(p, old_url, new_url, new_pkgver));
+
+			if !matched {
+				return Evaluation {
+					name: EvaluationName::Source,
+					pkgname,
+					description: format!(
+						"Source changed with no matching pattern{}: {} -> {}",
+						arch_label, old_url, new_url,
+					),
+					risk: RiskLevel::High,
+					modified: true,
+				};
+			}
+		}
+	}
+
+	let any_changed = all_arches.iter().any(|arch| {
+		prev_by_arch.get(arch).unwrap_or(&empty) != new_by_arch.get(arch).unwrap_or(&empty)
+	});
+
+	Evaluation {
+		name: EvaluationName::Source,
+		pkgname,
+		description: if any_changed {
+			"Source URLs changed consistently with pkgver bump".to_string()
+		} else {
+			"Sources unchanged".to_string()
+		},
+		risk: RiskLevel::Low,
+		modified: any_changed,
+	}
+}
+
+fn is_local_source(url: &str) -> bool {
+	!url.contains("://")
+}
+
+// Consulting any one checksum array is sufficient because evaluate_checksum_consistency
+// already guarantees all arrays agree on which positions are SKIP.
+fn first_checksum_values(srcinfo: &Srcinfo, arch_key: &str) -> Vec<String> {
+	let checksum_fields: &[&srcinfo::ArchVecs] = &[
+		&srcinfo.base.sha256sums,
+		&srcinfo.base.sha512sums,
+		&srcinfo.base.b2sums,
+		&srcinfo.base.sha384sums,
+		&srcinfo.base.sha224sums,
+	];
+	for arch_vecs in checksum_fields {
+		for av in arch_vecs.iter() {
+			if av.arch().unwrap_or("") == arch_key {
+				let vals: Vec<String> = av.iter().map(|s| s.to_string()).collect();
+				if !vals.is_empty() {
+					return vals;
+				}
+			}
+		}
+	}
+	vec![]
+}
+
+fn has_checksum_skip_issue(srcinfo: &Srcinfo) -> bool {
+	let by_arch = source_entries_by_arch(&srcinfo.base.source);
+	for (arch_key, vals) in &by_arch {
+		let checksums = first_checksum_values(srcinfo, arch_key);
+		for (i, entry) in vals.iter().enumerate() {
+			let url = strip_source_prefix(entry);
+			let cksum = checksums.get(i).map(|s| s.as_str()).unwrap_or("");
+			if is_local_source(url) {
+				if cksum == "SKIP" || cksum.is_empty() {
+					return true;
+				}
+			} else if cksum == "SKIP" {
+				return true;
+			}
+		}
+	}
+	false
+}
+
+fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Evaluation {
+	let prev_by_arch = source_entries_by_arch(&previous.base.source);
+	let new_by_arch = source_entries_by_arch(&proposed.base.source);
+
+	let all_arches: BTreeSet<String> = prev_by_arch
+		.keys()
+		.chain(new_by_arch.keys())
+		.cloned()
+		.collect();
+
+	let empty_sources: Vec<String> = vec![];
+
+	for arch_key in &all_arches {
+		let prev_srcs = prev_by_arch.get(arch_key).unwrap_or(&empty_sources);
+		let new_srcs = new_by_arch.get(arch_key).unwrap_or(&empty_sources);
+
+		let prev_cksums = first_checksum_values(previous, arch_key);
+		let new_cksums = first_checksum_values(proposed, arch_key);
+
+		let arch_label = if arch_key.is_empty() {
+			String::new()
+		} else {
+			format!(" (arch={})", arch_key)
+		};
+
+		for (i, new_entry) in new_srcs.iter().enumerate() {
+			let new_url = strip_source_prefix(new_entry);
+			let new_cksum = new_cksums.get(i).map(|s| s.as_str()).unwrap_or("");
+
+			if is_local_source(new_url) {
+				let new_is_skip = new_cksum == "SKIP" || new_cksum.is_empty();
+
+				if new_is_skip {
+					let prev_also_skip = prev_srcs
+						.get(i)
+						.map(|prev_entry| {
+							let prev_url = strip_source_prefix(prev_entry);
+							let prev_cksum = prev_cksums.get(i).map(|s| s.as_str()).unwrap_or("");
+							prev_url == new_url && (prev_cksum == "SKIP" || prev_cksum.is_empty())
+						})
+						.unwrap_or(false);
+
+					return Evaluation {
+						name: EvaluationName::ChecksumSkip,
+						pkgname,
+						description: format!(
+							"Local file '{}' has SKIP checksum — local files must have a real checksum{}",
+							new_url, arch_label,
+						),
+						risk: RiskLevel::High,
+						modified: !prev_also_skip,
+					};
+				}
+
+				// Local file with a real checksum: flag if it changed vs prev.
+				if let Some(prev_entry) = prev_srcs.get(i) {
+					let prev_url = strip_source_prefix(prev_entry);
+					let prev_cksum = prev_cksums.get(i).map(|s| s.as_str()).unwrap_or("");
+					if is_local_source(prev_url)
+						&& prev_url == new_url
+						&& prev_cksum != "SKIP"
+						&& !prev_cksum.is_empty()
+						&& prev_cksum != new_cksum
+					{
+						return Evaluation {
+							name: EvaluationName::ChecksumSkip,
+							pkgname,
+							description: format!(
+								"Local file '{}' checksum changed — the file may have been modified{}",
+								new_url, arch_label,
+							),
+							risk: RiskLevel::High,
+							modified: true,
+						};
+					}
+				}
+			} else {
+				// Remote sources: only the explicit SKIP token is flagged; an
+				// absent checksum array is not.
+				if new_cksum != "SKIP" {
+					continue;
+				}
+
+				let prev_cksum: Option<&str> = prev_srcs
+					.get(i)
+					.map(|_| prev_cksums.get(i).map(|s| s.as_str()).unwrap_or(""));
+
+				// prev_cksum is None when this source index didn't exist before
+				// (source count increased). evaluate_source also flags this, but
+				// a new remote source with SKIP is itself a checksum concern.
+				if prev_cksum.is_none() {
+					return Evaluation {
+						name: EvaluationName::ChecksumSkip,
+						pkgname,
+						description: format!(
+							"New remote source '{}' has SKIP checksum{}",
+							new_url, arch_label,
+						),
+						risk: RiskLevel::High,
+						modified: true,
+					};
+				}
+
+				if prev_cksum.is_some_and(|c| c != "SKIP" && !c.is_empty()) {
+					return Evaluation {
+						name: EvaluationName::ChecksumSkip,
+						pkgname,
+						description: format!(
+							"Remote source '{}' previously had a checksum but now has SKIP{}",
+							new_url, arch_label,
+						),
+						risk: RiskLevel::High,
+						modified: true,
+					};
+				}
+			}
+		}
+	}
+
+	Evaluation {
+		name: EvaluationName::ChecksumSkip,
+		pkgname,
+		description: "Checksum verification OK".to_string(),
+		risk: RiskLevel::Low,
+		modified: has_checksum_skip_issue(previous) && !has_checksum_skip_issue(proposed),
+	}
+}
+
 fn evaluate_depends(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> Evaluation {
 	evaluate_array_field(
 		EvaluationName::Depends,
@@ -807,7 +1304,7 @@ pkgbase = example
 \tpkgver = 1.0.0
 \tpkgrel = 1
 \tarch = x86_64
-\tmd5sums = SKIP
+\tsha256sums = SKIP
 
 pkgname = example
 \tpkgdesc = An example package
@@ -896,7 +1393,7 @@ pkgname = example
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Epoch, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -922,13 +1419,24 @@ pkgname = example
 		vec![pkg_archvec(values)].into()
 	}
 
+	fn pkg_archvec_for(arch: &str, values: Vec<&str>) -> srcinfo::ArchVec {
+		srcinfo::ArchVec::with_values(
+			Some(arch.to_string()),
+			values.into_iter().map(|s| s.to_string()).collect(),
+		)
+	}
+
+	fn archvecs_for(arch: &str, values: Vec<&str>) -> srcinfo::ArchVecs {
+		vec![pkg_archvec_for(arch, values)].into()
+	}
+
 	const SPLIT_SRCINFO: &str = "\
 pkgbase = example
 \tpkgdesc = An example package
 \tpkgver = 1.0.0
 \tpkgrel = 1
 \tarch = x86_64
-\tmd5sums = SKIP
+\tsha256sums = SKIP
 
 pkgname = example
 \tpkgdesc = An example package
@@ -990,7 +1498,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = Srcinfo::from_str(case.previous).unwrap();
 			let proposed = Srcinfo::from_str(case.proposed).unwrap();
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::PackageSet, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1040,7 +1548,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Depends, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1083,7 +1591,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::MakeDepends, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1119,7 +1627,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::CheckDepends, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1198,8 +1706,58 @@ pkgname = example-extra
 			let proposed = with_modification(|s| {
 				s.base.valid_pgp_keys = case.proposed_keys.iter().map(|k| k.to_string()).collect();
 			});
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::ValidPgpKeys, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_no_extract() {
+		let cases = [
+			ArrayFieldCase {
+				name: "unchanged_empty",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "unchanged_with_entries",
+				previous: |s| s.base.no_extract = vec!["foo.zip".to_string()],
+				proposed: |s| s.base.no_extract = vec!["foo.zip".to_string()],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			ArrayFieldCase {
+				name: "entry_added",
+				previous: |_| {},
+				proposed: |s| s.base.no_extract = vec!["foo.zip".to_string()],
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "entry_removed",
+				previous: |s| s.base.no_extract = vec!["foo.zip".to_string()],
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			ArrayFieldCase {
+				name: "entry_replaced",
+				previous: |s| s.base.no_extract = vec!["foo.zip".to_string()],
+				proposed: |s| s.base.no_extract = vec!["bar.zip".to_string()],
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
+			let eval = find_eval(&evals, EvaluationName::NoExtract, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
 		}
@@ -1234,7 +1792,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::OptDepends, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1277,7 +1835,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Provides, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1313,7 +1871,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Conflicts, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1356,7 +1914,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Replaces, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1570,7 +2128,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Pkgver, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1642,7 +2200,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Pkgrel, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1696,7 +2254,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::UnexplainedUpdate, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1746,7 +2304,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Install, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1817,7 +2375,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Url, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1860,7 +2418,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Pkgdesc, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1903,7 +2461,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Changelog, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -1960,7 +2518,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Arch, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -2017,7 +2575,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::License, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -2078,7 +2636,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Groups, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -2139,7 +2697,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Backup, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -2148,7 +2706,7 @@ pkgname = example-extra
 		// Verify description contains diff details when modified
 		let previous = with_modification(|s| s.pkgs[0].backup = vec!["etc/foo.conf".to_string()]);
 		let proposed = with_modification(|s| s.pkgs[0].backup = vec!["etc/bar.conf".to_string()]);
-		let evals = evaluate_srcinfo_diff(&previous, &proposed);
+		let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 		let eval = find_eval(&evals, EvaluationName::Backup, "example");
 		assert!(
 			eval.description.contains("etc/bar.conf") && eval.description.contains("etc/foo.conf"),
@@ -2277,7 +2835,7 @@ pkgname = example-extra
 		for case in &cases {
 			let previous = with_modification(case.previous);
 			let proposed = with_modification(case.proposed);
-			let evals = evaluate_srcinfo_diff(&previous, &proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 			let eval = find_eval(&evals, EvaluationName::Options, "example");
 			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
 			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
@@ -2289,12 +2847,939 @@ pkgname = example-extra
 		let proposed = with_modification(|s| {
 			s.pkgs[0].options = vec!["strip".to_string(), "!buildflags".to_string()]
 		});
-		let evals = evaluate_srcinfo_diff(&previous, &proposed);
+		let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
 		let eval = find_eval(&evals, EvaluationName::Options, "example");
 		assert!(
 			eval.description.contains("!buildflags") && eval.description.contains("lto"),
 			"description should mention added '!buildflags' and removed 'lto', got: {}",
 			eval.description
 		);
+	}
+
+	#[test]
+	fn test_insecure_checksum() {
+		struct InsecureChecksumCase {
+			name: &'static str,
+			previous: fn(&mut Srcinfo),
+			proposed: fn(&mut Srcinfo),
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases = [
+			InsecureChecksumCase {
+				name: "no_checksums",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			InsecureChecksumCase {
+				name: "skip_only_not_insecure",
+				previous: |_| {},
+				proposed: |s| s.base.md5sums = archvecs(vec!["SKIP"]),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			InsecureChecksumCase {
+				name: "md5_introduced",
+				previous: |_| {},
+				proposed: |s| s.base.md5sums = archvecs(vec!["d41d8cd98f00b204e9800998ecf8427e"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			InsecureChecksumCase {
+				name: "sha1_introduced",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha1sums = archvecs(vec!["da39a3ee5e6b4b0d3255bfef95601890afd80709"])
+				},
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			InsecureChecksumCase {
+				name: "md5_unchanged",
+				previous: |s| s.base.md5sums = archvecs(vec!["d41d8cd98f00b204e9800998ecf8427e"]),
+				proposed: |s| s.base.md5sums = archvecs(vec!["d41d8cd98f00b204e9800998ecf8427e"]),
+				risk: RiskLevel::High,
+				modified: false,
+			},
+			InsecureChecksumCase {
+				name: "md5_removed",
+				previous: |s| s.base.md5sums = archvecs(vec!["d41d8cd98f00b204e9800998ecf8427e"]),
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			InsecureChecksumCase {
+				name: "md5_replaced_with_skip",
+				previous: |s| s.base.md5sums = archvecs(vec!["d41d8cd98f00b204e9800998ecf8427e"]),
+				proposed: |s| s.base.md5sums = archvecs(vec!["SKIP"]),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
+			let eval = find_eval(&evals, EvaluationName::InsecureChecksum, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_checksum_consistency() {
+		struct ConsistencyCase {
+			name: &'static str,
+			previous: fn(&mut Srcinfo),
+			proposed: fn(&mut Srcinfo),
+			risk: RiskLevel,
+			modified: bool,
+			description_contains: Option<&'static str>,
+		}
+
+		let cases = [
+			ConsistencyCase {
+				name: "no_checksums",
+				previous: |_| {},
+				proposed: |_| {},
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "single_type_only",
+				previous: |s| s.base.sha256sums = archvecs(vec!["aaaa"]),
+				proposed: |s| s.base.sha256sums = archvecs(vec!["aaaa"]),
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "two_types_same_length_no_skip",
+				previous: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "bbbb"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "dddd"]);
+				},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "bbbb"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "dddd"]);
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "two_types_skip_at_same_index",
+				previous: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "SKIP"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "SKIP"]);
+				},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "SKIP"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "SKIP"]);
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "length_mismatch",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "dddd"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "skip_mismatch_at_index_0",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["SKIP"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "skip_mismatch_at_index_1",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "SKIP"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "dddd"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "skip_mismatch_reversed",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "bbbb"]);
+					s.base.sha512sums = archvecs(vec!["SKIP", "dddd"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "unchanged_inconsistency",
+				previous: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["SKIP"]);
+				},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["SKIP"]);
+				},
+				risk: RiskLevel::High,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "inconsistency_fixed",
+				previous: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["SKIP"]);
+				},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					s.base.sha512sums = archvecs(vec!["cccc"]);
+				},
+				risk: RiskLevel::Low,
+				modified: true,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "all_skip_consistent",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["SKIP"]);
+					s.base.sha512sums = archvecs(vec!["SKIP"]);
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "three_types_one_length_mismatch",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs(vec!["aaaa", "bbbb"]);
+					s.base.sha512sums = archvecs(vec!["cccc", "dddd"]);
+					s.base.b2sums = archvecs(vec!["eeee"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: None,
+			},
+			// ---- arch-specific cases -------------------------------------------
+			ConsistencyCase {
+				name: "arch_specific_two_types_consistent",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs_for("x86_64", vec!["aaaa", "bbbb"]);
+					s.base.sha512sums = archvecs_for("x86_64", vec!["cccc", "dddd"]);
+				},
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			ConsistencyCase {
+				name: "arch_specific_length_mismatch",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs_for("x86_64", vec!["aaaa"]);
+					s.base.sha512sums = archvecs_for("x86_64", vec!["cccc", "dddd"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+			ConsistencyCase {
+				name: "arch_specific_skip_mismatch",
+				previous: |_| {},
+				proposed: |s| {
+					s.base.sha256sums = archvecs_for("x86_64", vec!["aaaa"]);
+					s.base.sha512sums = archvecs_for("x86_64", vec!["SKIP"]);
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+			ConsistencyCase {
+				name: "generic_ok_arch_specific_inconsistent",
+				previous: |_| {},
+				proposed: |s| {
+					// Generic arch: only sha256sums present, no comparison possible.
+					s.base.sha256sums = archvecs(vec!["aaaa"]);
+					// x86_64: sha256 and sha512 have a length mismatch.
+					s.base.sha512sums = archvecs_for("x86_64", vec!["cccc", "dddd"]);
+					s.base.sha256sums = vec![
+						pkg_archvec(vec!["aaaa"]),
+						pkg_archvec_for("x86_64", vec!["eeee"]),
+					]
+					.into();
+				},
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+		];
+
+		for case in &cases {
+			let previous = with_modification(case.previous);
+			let proposed = with_modification(case.proposed);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
+			let eval = find_eval(&evals, EvaluationName::ChecksumConsistency, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+			if let Some(expected) = case.description_contains {
+				assert!(
+					eval.description.contains(expected),
+					"case: {} — expected description to contain {:?}, got: {:?}",
+					case.name,
+					expected,
+					eval.description,
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_source() {
+		let github_archive = Regex::new(
+			r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/v?(?P<version>[^/]+)\.tar\.gz",
+		)
+		.unwrap();
+		let github_release =
+			Regex::new(r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/v?(?P<version>[^/]+)/[^/]+")
+				.unwrap();
+		let trust_all = Regex::new(r"https://trusted-mirror\.example\.com/.+").unwrap();
+
+		// Helper: build srcinfo with specific pkgver and source entries.
+		let make = |pkgver: &str, sources: &[&str]| {
+			let mut s = parse_base();
+			s.base.pkgver = pkgver.to_string();
+			s.base.source = archvecs(sources.to_vec());
+			s
+		};
+
+		// Workaround: closures capturing locals can't be fn pointers, so we use
+		// a direct loop instead of the struct-based pattern used elsewhere.
+
+		struct SourceCase<'a> {
+			name: &'a str,
+			prev_pkgver: &'a str,
+			prev_sources: &'a [&'a str],
+			new_pkgver: &'a str,
+			new_sources: &'a [&'a str],
+			patterns: &'a [Regex],
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let gh_archive = std::slice::from_ref(&github_archive);
+		let _gh_release = std::slice::from_ref(&github_release);
+		let trust = std::slice::from_ref(&trust_all);
+		let all_patterns = &[github_archive.clone(), github_release.clone()][..];
+
+		let cases: &[SourceCase] = &[
+			SourceCase {
+				name: "no_sources_unchanged",
+				prev_pkgver: "1.0.0",
+				prev_sources: &[],
+				new_pkgver: "1.0.0",
+				new_sources: &[],
+				patterns: &[],
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			SourceCase {
+				name: "sources_identical",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "1.0.0",
+				new_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			SourceCase {
+				name: "count_increased",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &[
+					"https://github.com/foo/bar/archive/v2.0.0.tar.gz",
+					"https://github.com/foo/bar/archive/v2.0.0-extra.tar.gz",
+				],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "count_decreased",
+				prev_pkgver: "1.0.0",
+				prev_sources: &[
+					"https://github.com/foo/bar/archive/v1.0.0.tar.gz",
+					"https://github.com/foo/bar/archive/v1.0.0-extra.tar.gz",
+				],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://github.com/foo/bar/archive/v2.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "version_bump_matches_pkgver",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://github.com/foo/bar/archive/v2.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			SourceCase {
+				name: "version_does_not_match_pkgver",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://github.com/foo/bar/archive/v3.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "repo_changed",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://github.com/foo/other/archive/v2.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "owner_changed",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://github.com/attacker/bar/archive/v2.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "no_pattern_matches",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://example.com/custom/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://example.com/custom/v2.0.0.tar.gz"],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "trust_all_pattern_no_version_group",
+				prev_pkgver: "1.0.0",
+				prev_sources: &["https://trusted-mirror.example.com/v1.0.0.tar.gz"],
+				new_pkgver: "2.0.0",
+				new_sources: &["https://trusted-mirror.example.com/v2.0.0.tar.gz"],
+				patterns: trust,
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			SourceCase {
+				name: "multiple_sources_all_consistent",
+				prev_pkgver: "1.0.0",
+				prev_sources: &[
+					"https://github.com/foo/bar/archive/v1.0.0.tar.gz",
+					"https://github.com/foo/bar/releases/download/v1.0.0/bar-1.0.0.tar.gz",
+				],
+				new_pkgver: "2.0.0",
+				new_sources: &[
+					"https://github.com/foo/bar/archive/v2.0.0.tar.gz",
+					"https://github.com/foo/bar/releases/download/v2.0.0/bar-2.0.0.tar.gz",
+				],
+				patterns: all_patterns,
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			SourceCase {
+				name: "multiple_sources_one_inconsistent",
+				prev_pkgver: "1.0.0",
+				prev_sources: &[
+					"https://github.com/foo/bar/archive/v1.0.0.tar.gz",
+					"https://example.com/patch.diff",
+				],
+				new_pkgver: "2.0.0",
+				new_sources: &[
+					"https://github.com/foo/bar/archive/v2.0.0.tar.gz",
+					"https://evil.example.com/patch.diff",
+				],
+				patterns: gh_archive,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			SourceCase {
+				name: "name_prefix_stripped_before_matching",
+				prev_pkgver: "1.0.0",
+				prev_sources: &[
+					"bar-1.0.0.tar.gz::https://github.com/foo/bar/archive/v1.0.0.tar.gz",
+				],
+				new_pkgver: "2.0.0",
+				new_sources: &[
+					"bar-2.0.0.tar.gz::https://github.com/foo/bar/archive/v2.0.0.tar.gz",
+				],
+				patterns: gh_archive,
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+		];
+
+		for case in cases {
+			let previous = make(case.prev_pkgver, case.prev_sources);
+			let proposed = make(case.new_pkgver, case.new_sources);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, case.patterns);
+			let eval = find_eval(&evals, EvaluationName::Source, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	#[test]
+	fn test_source_arch_specific() {
+		let github_archive = Regex::new(
+			r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/archive/v?(?P<version>[^/]+)\.tar\.gz",
+		)
+		.unwrap();
+
+		// Helper: build srcinfo with arch-specific source entries.
+		let make_arch = |pkgver: &str, arch: &str, sources: &[&str]| {
+			let mut s = parse_base();
+			s.base.pkgver = pkgver.to_string();
+			s.base.source = archvecs_for(arch, sources.to_vec());
+			s
+		};
+
+		struct ArchSourceCase<'a> {
+			name: &'a str,
+			prev: Srcinfo,
+			proposed: Srcinfo,
+			patterns: &'a [Regex],
+			risk: RiskLevel,
+			modified: bool,
+			description_contains: Option<&'a str>,
+		}
+
+		let gh = std::slice::from_ref(&github_archive);
+
+		let cases = [
+			// Arch-specific source unchanged — no risk, not modified.
+			ArchSourceCase {
+				name: "arch_source_unchanged",
+				prev: make_arch(
+					"1.0.0",
+					"x86_64",
+					&["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				),
+				proposed: make_arch(
+					"1.0.0",
+					"x86_64",
+					&["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				),
+				patterns: gh,
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			// Arch-specific source count increases — high risk with arch label.
+			ArchSourceCase {
+				name: "arch_source_count_increased",
+				prev: make_arch("1.0.0", "x86_64", &[]),
+				proposed: make_arch(
+					"2.0.0",
+					"x86_64",
+					&["https://github.com/foo/bar/archive/v2.0.0.tar.gz"],
+				),
+				patterns: gh,
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+			// Arch-specific version bump matches pkgver and pattern — low risk.
+			ArchSourceCase {
+				name: "arch_source_version_bump_matches",
+				prev: make_arch(
+					"1.0.0",
+					"x86_64",
+					&["https://github.com/foo/bar/archive/v1.0.0.tar.gz"],
+				),
+				proposed: make_arch(
+					"2.0.0",
+					"x86_64",
+					&["https://github.com/foo/bar/archive/v2.0.0.tar.gz"],
+				),
+				patterns: gh,
+				risk: RiskLevel::Low,
+				modified: true,
+				description_contains: None,
+			},
+			// Arch-specific URL changed but no pattern matches — high risk with arch label.
+			ArchSourceCase {
+				name: "arch_source_no_pattern_match",
+				prev: make_arch(
+					"1.0.0",
+					"x86_64",
+					&["https://example.com/custom/v1.0.0.tar.gz"],
+				),
+				proposed: make_arch(
+					"2.0.0",
+					"x86_64",
+					&["https://example.com/custom/v2.0.0.tar.gz"],
+				),
+				patterns: gh,
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+		];
+
+		for case in &cases {
+			let evals = evaluate_srcinfo_diff(&case.prev, &case.proposed, case.patterns);
+			let eval = find_eval(&evals, EvaluationName::Source, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+			if let Some(expected) = case.description_contains {
+				assert!(
+					eval.description.contains(expected),
+					"case: {} — expected description to contain {:?}, got: {:?}",
+					case.name,
+					expected,
+					eval.description,
+				);
+			}
+		}
+	}
+
+	/// Build a Srcinfo with a specific source list and a parallel sha256sums
+	/// list.  Pass `None` for `checksums` to omit the checksum field entirely.
+	fn make_with_checksums(sources: &[&str], checksums: Option<&[&str]>) -> Srcinfo {
+		let mut s = parse_base();
+		s.base.source = if sources.is_empty() {
+			srcinfo::ArchVecs::default()
+		} else {
+			archvecs(sources.to_vec())
+		};
+		s.base.sha256sums = match checksums {
+			None => srcinfo::ArchVecs::default(),
+			Some(cs) => archvecs(cs.to_vec()),
+		};
+		s
+	}
+
+	#[test]
+	fn test_checksum_skip() {
+		struct Case<'a> {
+			name: &'a str,
+			prev_sources: &'a [&'a str],
+			prev_checksums: Option<&'a [&'a str]>,
+			new_sources: &'a [&'a str],
+			new_checksums: Option<&'a [&'a str]>,
+			risk: RiskLevel,
+			modified: bool,
+		}
+
+		let cases: &[Case] = &[
+			// ---- baseline / clean cases ----------------------------------------
+			Case {
+				name: "no_sources",
+				prev_sources: &[],
+				prev_checksums: None,
+				new_sources: &[],
+				new_checksums: None,
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			Case {
+				name: "remote_real_checksum_unchanged",
+				prev_sources: &["https://example.com/foo-1.0.tar.gz"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["https://example.com/foo-1.0.tar.gz"],
+				new_checksums: Some(&["abc123"]),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			Case {
+				name: "local_file_real_checksum_unchanged",
+				prev_sources: &["my-patch.patch"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["my-patch.patch"],
+				new_checksums: Some(&["abc123"]),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			// ---- local file issues ---------------------------------------------
+			// Local file with SKIP — newly introduced.
+			Case {
+				name: "local_file_skip_introduced",
+				prev_sources: &[],
+				prev_checksums: None,
+				new_sources: &["my-patch.patch"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Same local file already had SKIP in the previously accepted version.
+			Case {
+				name: "local_file_skip_unchanged",
+				prev_sources: &["my-patch.patch"],
+				prev_checksums: Some(&["SKIP"]),
+				new_sources: &["my-patch.patch"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::High,
+				modified: false,
+			},
+			// Local file with no checksum array at all (absent ≡ SKIP for local).
+			Case {
+				name: "local_file_no_checksum_array",
+				prev_sources: &[],
+				prev_checksums: None,
+				new_sources: &["my-patch.patch"],
+				new_checksums: None,
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Local file with `localname::` prefix and SKIP.
+			Case {
+				name: "local_file_with_prefix_skip",
+				prev_sources: &[],
+				prev_checksums: None,
+				new_sources: &["renamed.patch::my-patch.patch"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Local file checksum changed — potential tamper.
+			Case {
+				name: "local_file_checksum_changed",
+				prev_sources: &["my-patch.patch"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["my-patch.patch"],
+				new_checksums: Some(&["def456"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Local SKIP was fixed → now low risk but marked as modified.
+			Case {
+				name: "local_file_skip_fixed",
+				prev_sources: &["my-patch.patch"],
+				prev_checksums: Some(&["SKIP"]),
+				new_sources: &["my-patch.patch"],
+				new_checksums: Some(&["abc123"]),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			// Mixed: remote OK, local SKIP — the local issue is caught.
+			Case {
+				name: "mixed_remote_ok_local_skip",
+				prev_sources: &[],
+				prev_checksums: None,
+				new_sources: &["https://example.com/foo.tar.gz", "my-patch.patch"],
+				new_checksums: Some(&["abc123", "SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// ---- remote SKIP issues --------------------------------------------
+			// Remote source had a real checksum, now SKIP.
+			Case {
+				name: "remote_real_to_skip",
+				prev_sources: &["https://example.com/foo-1.0.tar.gz"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["https://example.com/foo-2.0.tar.gz"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// New remote source (count increased) with SKIP.
+			Case {
+				name: "new_remote_source_with_skip",
+				prev_sources: &["https://example.com/foo-1.0.tar.gz"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &[
+					"https://example.com/foo-1.0.tar.gz",
+					"https://example.com/extra.tar.gz",
+				],
+				new_checksums: Some(&["abc123", "SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Remote with `localname::` prefix: real → SKIP.
+			Case {
+				name: "remote_with_prefix_real_to_skip",
+				prev_sources: &["foo-1.0.tar.gz::https://example.com/foo-1.0.tar.gz"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["foo-2.0.tar.gz::https://example.com/foo-2.0.tar.gz"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::High,
+				modified: true,
+			},
+			// Remote already SKIP in prev, still SKIP — no regression.
+			Case {
+				name: "remote_skip_unchanged",
+				prev_sources: &["https://example.com/foo.tar.gz"],
+				prev_checksums: Some(&["SKIP"]),
+				new_sources: &["https://example.com/foo.tar.gz"],
+				new_checksums: Some(&["SKIP"]),
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+			// Remote SKIP fixed → low risk, modified.
+			Case {
+				name: "remote_skip_fixed",
+				prev_sources: &["https://example.com/foo.tar.gz"],
+				prev_checksums: Some(&["SKIP"]),
+				new_sources: &["https://example.com/foo.tar.gz"],
+				new_checksums: Some(&["abc123"]),
+				risk: RiskLevel::Low,
+				modified: true,
+			},
+			// Absent checksum array on a remote source is NOT treated as SKIP.
+			Case {
+				name: "remote_absent_checksum_not_flagged",
+				prev_sources: &["https://example.com/foo-1.0.tar.gz"],
+				prev_checksums: Some(&["abc123"]),
+				new_sources: &["https://example.com/foo-2.0.tar.gz"],
+				new_checksums: None,
+				risk: RiskLevel::Low,
+				modified: false,
+			},
+		];
+
+		for case in cases {
+			let previous = make_with_checksums(case.prev_sources, case.prev_checksums);
+			let proposed = make_with_checksums(case.new_sources, case.new_checksums);
+			let evals = evaluate_srcinfo_diff(&previous, &proposed, &[]);
+			let eval = find_eval(&evals, EvaluationName::ChecksumSkip, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+		}
+	}
+
+	/// Build a Srcinfo with arch-specific sources and sha256sums.
+	/// Pass `None` for `checksums` to omit the checksum field entirely.
+	fn make_arch_with_checksums(
+		arch: &str,
+		sources: &[&str],
+		checksums: Option<&[&str]>,
+	) -> Srcinfo {
+		let mut s = parse_base();
+		s.base.source = if sources.is_empty() {
+			srcinfo::ArchVecs::default()
+		} else {
+			archvecs_for(arch, sources.to_vec())
+		};
+		s.base.sha256sums = match checksums {
+			None => srcinfo::ArchVecs::default(),
+			Some(cs) => archvecs_for(arch, cs.to_vec()),
+		};
+		s
+	}
+
+	#[test]
+	fn test_checksum_skip_arch_specific() {
+		struct Case<'a> {
+			name: &'a str,
+			prev: Srcinfo,
+			proposed: Srcinfo,
+			risk: RiskLevel,
+			modified: bool,
+			description_contains: Option<&'a str>,
+		}
+
+		let cases = [
+			// Arch-specific remote source with a real checksum — no issue.
+			Case {
+				name: "arch_remote_real_checksum_ok",
+				prev: make_arch_with_checksums(
+					"x86_64",
+					&["https://example.com/foo-1.0.tar.gz"],
+					Some(&["abc123"]),
+				),
+				proposed: make_arch_with_checksums(
+					"x86_64",
+					&["https://example.com/foo-1.0.tar.gz"],
+					Some(&["abc123"]),
+				),
+				risk: RiskLevel::Low,
+				modified: false,
+				description_contains: None,
+			},
+			// Arch-specific local file with SKIP — flagged with arch label.
+			Case {
+				name: "arch_local_skip_introduced",
+				prev: make_arch_with_checksums("x86_64", &[], None),
+				proposed: make_arch_with_checksums("x86_64", &["my-patch.patch"], Some(&["SKIP"])),
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+			// Arch-specific remote source had real checksum, now SKIP — flagged with arch label.
+			Case {
+				name: "arch_remote_real_to_skip",
+				prev: make_arch_with_checksums(
+					"x86_64",
+					&["https://example.com/foo-1.0.tar.gz"],
+					Some(&["abc123"]),
+				),
+				proposed: make_arch_with_checksums(
+					"x86_64",
+					&["https://example.com/foo-2.0.tar.gz"],
+					Some(&["SKIP"]),
+				),
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+			// Arch-specific new remote source with SKIP — flagged with arch label.
+			Case {
+				name: "arch_new_remote_source_with_skip",
+				prev: make_arch_with_checksums("x86_64", &[], None),
+				proposed: make_arch_with_checksums(
+					"x86_64",
+					&["https://example.com/foo.tar.gz"],
+					Some(&["SKIP"]),
+				),
+				risk: RiskLevel::High,
+				modified: true,
+				description_contains: Some("(arch=x86_64)"),
+			},
+		];
+
+		for case in &cases {
+			let evals = evaluate_srcinfo_diff(&case.prev, &case.proposed, &[]);
+			let eval = find_eval(&evals, EvaluationName::ChecksumSkip, "example");
+			assert_eq!(eval.risk, case.risk, "case: {}", case.name);
+			assert_eq!(eval.modified, case.modified, "case: {}", case.name);
+			if let Some(expected) = case.description_contains {
+				assert!(
+					eval.description.contains(expected),
+					"case: {} — expected description to contain {:?}, got: {:?}",
+					case.name,
+					expected,
+					eval.description,
+				);
+			}
+		}
 	}
 }
