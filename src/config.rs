@@ -1,12 +1,20 @@
+use crate::evaluation::{EvaluationName, RiskLevel};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Default, Deserialize)]
+pub struct EvaluationConfig {
+	pub threshold: Option<RiskLevel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct RuaConfig {
 	#[serde(default)]
 	pub sources: Vec<String>,
+	#[serde(default)]
+	pub evaluations: HashMap<EvaluationName, EvaluationConfig>,
 	#[serde(default)]
 	pub packages: HashMap<String, PackageConfig>,
 }
@@ -15,6 +23,11 @@ pub struct RuaConfig {
 pub struct PackageConfig {
 	#[serde(default)]
 	pub sources: Vec<String>,
+	#[serde(default)]
+	pub evaluations: HashMap<EvaluationName, EvaluationConfig>,
+	/// Set to `false` to disable auto-merge for this package entirely.
+	/// Use `--no-auto-merge` on the command line to disable globally for a run.
+	pub auto_merge: Option<bool>,
 }
 
 impl RuaConfig {

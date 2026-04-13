@@ -11,10 +11,10 @@ pub enum CLIColorType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum AutoMerge {
-	Off,
+pub enum AutoMergeThreshold {
 	Low,
 	Medium,
+	High,
 }
 
 #[derive(Parser)]
@@ -93,10 +93,18 @@ pub enum Action {
 		#[arg(long)]
 		printonly: bool,
 
-		/// Automatically merge low-risk package updates without manual review.
-		/// Accepts: off, low, medium.
-		#[arg(long, value_enum, default_value_t = AutoMerge::Off, ignore_case = true)]
-		auto_merge: AutoMerge,
+		/// Force auto-merge, overriding auto_merge = false in config.
+		/// This is a presence flag (no value); use --auto-merge-threshold to set the risk level.
+		#[arg(long)]
+		auto_merge: bool,
+
+		/// Disable auto-merge for this run.
+		#[arg(long)]
+		no_auto_merge: bool,
+
+		/// Maximum risk level to auto-merge (default: low). Accepts: low, medium, high.
+		#[arg(long, value_enum, default_value_t = AutoMergeThreshold::Low, ignore_case = true)]
+		auto_merge_threshold: AutoMergeThreshold,
 
 		/// Don't upgrade the specified package(s). Accepts multiple arguments separated by `,`.
 		#[arg(long)]

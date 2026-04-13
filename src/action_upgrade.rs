@@ -2,7 +2,7 @@ use crate::action_install;
 use crate::alpm_wrapper::new_alpm_wrapper;
 use crate::alpm_wrapper::AlpmWrapper;
 use crate::aur_rpc_utils;
-use crate::cli_args::AutoMerge;
+use crate::auto_merge::AutoMergeMode;
 use crate::pacman;
 use crate::rua_paths::RuaPaths;
 use crate::terminal_util;
@@ -55,7 +55,7 @@ pub fn upgrade_real(
 	rua_paths: &RuaPaths,
 	ignored: &HashSet<&str>,
 	only_packages: &HashSet<&str>,
-	auto_merge: AutoMerge,
+	mode: &AutoMergeMode,
 ) -> Result<()> {
 	let alpm = new_alpm_wrapper();
 	let (outdated, nonexistent) = calculate_upgrade(&*alpm, devel, ignored, only_packages)?;
@@ -80,7 +80,7 @@ pub fn upgrade_real(
 			let user_input = terminal_util::read_line_lowercase();
 			if &user_input == "o" {
 				let outdated: Vec<String> = outdated.iter().map(|o| o.0.to_string()).collect();
-				action_install::install(&outdated, rua_paths, false, true, auto_merge);
+				action_install::install(&outdated, rua_paths, false, true, mode);
 				break;
 			} else if &user_input == "x" {
 				break;
