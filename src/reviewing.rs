@@ -1,6 +1,7 @@
 use crate::cli_args::AutoMerge;
 use crate::config::RuaConfig;
 use crate::git_utils;
+use crate::pkgbuild_eval;
 use crate::rua_paths::RuaPaths;
 use crate::srcinfo_eval;
 use crate::terminal_util;
@@ -22,15 +23,12 @@ enum SrcinfoValidation {
 
 fn validate_upstream_srcinfo(
 	upstream_srcinfo: &Srcinfo,
-	dir: &Path,
-	rua_paths: &RuaPaths,
+	upstream_pkgbuild: &str,
 ) -> SrcinfoValidation {
-	let pkgbuild_text = git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
-
 	let tmp_dir = tempfile::TempDir::new().expect("Failed to create temp directory");
 
 	let pkgbuild_path = tmp_dir.path().join("PKGBUILD");
-	std::fs::write(&pkgbuild_path, &pkgbuild_text)
+	std::fs::write(&pkgbuild_path, upstream_pkgbuild)
 		.expect("Failed to write PKGBUILD to temp directory");
 
 	let tmp_dir_str = tmp_dir
@@ -98,7 +96,10 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 				panic!("Failed to parse .SRCINFO provided by AUR:\nError: {}", e)
 			});
 
-			match validate_upstream_srcinfo(&upstream_srcinfo, dir, rua_paths) {
+			let upstream_pkgbuild =
+				git_utils::show_file(dir, "upstream/master", "PKGBUILD", rua_paths);
+
+			match validate_upstream_srcinfo(&upstream_srcinfo, &upstream_pkgbuild) {
 				SrcinfoValidation::GenerationFailed(reason) => {
 					eprintln!(
 						"Auto-merge: could not generate SRCINFO for {}, skipping auto-merge.\n{}",
@@ -135,11 +136,22 @@ pub fn review_repo(dir: &Path, pkgbase: &str, rua_paths: &RuaPaths, auto_merge: 
 										pkgbase, e
 									)
 								});
-							let evaluations = srcinfo_eval::evaluate_srcinfo_diff(
+							let mut evaluations = srcinfo_eval::evaluate_srcinfo_diff(
 								&previous_srcinfo,
 								&upstream_srcinfo,
 								&patterns,
 							);
+
+							if let Some(prev_pkgbuild) =
+								git_utils::try_show_file(dir, "HEAD", "PKGBUILD", rua_paths)
+							{
+								evaluations.extend(pkgbuild_eval::evaluate_pkgbuild_diff(
+									&prev_pkgbuild,
+									&upstream_pkgbuild,
+									&upstream_srcinfo.base.pkgbase,
+								));
+							}
+
 							eprintln!(
 								"Auto-merge: risk evaluations for {} ({} check{}):",
 								pkgbase,

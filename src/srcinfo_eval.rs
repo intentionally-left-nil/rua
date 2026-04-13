@@ -4,52 +4,7 @@ use regex::Regex;
 use srcinfo::{Package, Srcinfo};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RiskLevel {
-	Low,
-	Medium,
-	High,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvaluationName {
-	Epoch,
-	PackageSet,
-	CheckDepends,
-	MakeDepends,
-	Depends,
-	OptDepends,
-	Provides,
-	Conflicts,
-	Replaces,
-	Pkgver,
-	Pkgrel,
-	UnexplainedUpdate,
-	Install,
-	Url,
-	Pkgdesc,
-	Changelog,
-	Arch,
-	License,
-	Groups,
-	Backup,
-	Options,
-	ValidPgpKeys,
-	NoExtract,
-	InsecureChecksum,
-	ChecksumConsistency,
-	Source,
-	ChecksumSkip,
-}
-
-#[derive(Debug, Clone)]
-pub struct Evaluation {
-	pub name: EvaluationName,
-	pub pkgname: String,
-	pub description: String,
-	pub risk: RiskLevel,
-	pub modified: bool,
-}
+pub use crate::evaluation::{Evaluation, EvaluationName, RiskLevel};
 
 pub fn evaluate_srcinfo_diff(
 	previous: &Srcinfo,

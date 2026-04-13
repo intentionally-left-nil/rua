@@ -56,6 +56,8 @@ url = "2"
 uname = "0.1.1"
 xz2 = "0.1.7"
 tempfile = "3.6.0"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
 
 [profile.release]
 lto = "thin"
