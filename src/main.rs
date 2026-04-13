@@ -4,6 +4,7 @@ mod action_search;
 mod action_upgrade;
 mod alpm_wrapper;
 mod aur_rpc_utils;
+mod auto_merge;
 mod cli_args;
 mod config;
 mod evaluation;
@@ -24,9 +25,11 @@ mod wrapped;
 
 use crate::print_package_info::info;
 use crate::wrapped::shellcheck;
+use auto_merge::AutoMergeMode;
 use cli_args::Action;
-use cli_args::AutoMerge;
+use cli_args::AutoMergeThreshold;
 use cli_args::CliArgs;
+use evaluation::RiskLevel;
 use std::collections::HashSet;
 use std::process::exit;
 use structopt::StructOpt;
@@ -44,7 +47,9 @@ fn main() {
 			target,
 		} => {
 			let paths = rua_paths::RuaPaths::initialize_paths();
-			action_install::install(target, &paths, *offline, *asdeps, AutoMerge::off);
+			// The `install` subcommand has no auto-merge flags; auto-merge is intentionally
+			// disabled here. Upgrades go through `upgrade_real` which passes the user's mode.
+			action_install::install(target, &paths, *offline, *asdeps, &AutoMergeMode::Disabled);
 		}
 		Action::Builddir {
 			offline,
@@ -75,6 +80,8 @@ fn main() {
 			devel,
 			printonly,
 			auto_merge,
+			no_auto_merge,
+			auto_merge_threshold,
 			ignored,
 			packages,
 		} => {
@@ -83,18 +90,27 @@ fn main() {
 				.flat_map(|i| i.split(','))
 				.collect::<HashSet<&str>>();
 			let only_packages: HashSet<&str> = packages.iter().map(String::as_str).collect();
-			let auto_merge = *auto_merge;
+			if *auto_merge && *no_auto_merge {
+				eprintln!("Error: --auto-merge and --no-auto-merge cannot be used together.");
+				exit(1);
+			}
+			let threshold = match auto_merge_threshold {
+				AutoMergeThreshold::low => RiskLevel::Low,
+				AutoMergeThreshold::medium => RiskLevel::Medium,
+				AutoMergeThreshold::high => RiskLevel::High,
+			};
+			let mode = if *no_auto_merge {
+				AutoMergeMode::Disabled
+			} else if *auto_merge {
+				AutoMergeMode::Forced(threshold)
+			} else {
+				AutoMergeMode::Enabled(threshold)
+			};
 			let result = if *printonly {
 				action_upgrade::upgrade_printonly(*devel, &ignored_set, &only_packages)
 			} else {
 				let paths = rua_paths::RuaPaths::initialize_paths();
-				action_upgrade::upgrade_real(
-					*devel,
-					&paths,
-					&ignored_set,
-					&only_packages,
-					auto_merge,
-				)
+				action_upgrade::upgrade_real(*devel, &paths, &ignored_set, &only_packages, &mode)
 			};
 			if let Err(e) = result {
 				eprintln!("{}", e);

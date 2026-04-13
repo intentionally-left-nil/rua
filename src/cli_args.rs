@@ -1,4 +1,4 @@
-pub use auto_merge_mod::AutoMerge;
+pub use auto_merge_threshold_mod::AutoMergeThreshold;
 pub use cli_color_type_mod::CLIColorType;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -18,15 +18,15 @@ pub mod cli_color_type_mod {
 	}
 }
 
-pub mod auto_merge_mod {
+pub mod auto_merge_threshold_mod {
 	#![allow(clippy::useless_vec)]
 	use structopt::clap::arg_enum;
 
 	arg_enum! {
 		#[allow(non_camel_case_types)]
 		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-		pub enum AutoMerge {
-			off, low, medium
+		pub enum AutoMergeThreshold {
+			low, medium, high
 		}
 	}
 }
@@ -132,13 +132,20 @@ Supports: git, hg, bzr, svn, cvs, darcs. Currently by suffix only."
 		printonly: bool,
 		#[structopt(
 			long = "auto-merge",
-			possible_values = &AutoMerge::variants(),
-			case_insensitive = true,
-			default_value = "off",
-			help = "Automatically merge low-risk package updates without manual review.
-Accepts: off, low, medium."
+			help = "Force auto-merge, overriding auto_merge = false in config. \
+This is a presence flag (no value); use --auto-merge-threshold to set the risk level."
 		)]
-		auto_merge: AutoMerge,
+		auto_merge: bool,
+		#[structopt(long = "no-auto-merge", help = "Disable auto-merge for this run.")]
+		no_auto_merge: bool,
+		#[structopt(
+			long = "auto-merge-threshold",
+			possible_values = &AutoMergeThreshold::variants(),
+			case_insensitive = true,
+			default_value = "low",
+			help = "Maximum risk level to auto-merge (default: low). Accepts: low, medium, high."
+		)]
+		auto_merge_threshold: AutoMergeThreshold,
 		#[structopt(
 			long = "ignore",
 			help = "Don't upgrade the specified package(s). Accepts multiple arguments separated by `,`."
