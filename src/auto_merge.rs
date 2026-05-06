@@ -7,7 +7,10 @@ use crate::srcinfo_eval;
 use crate::terminal_util;
 use crate::wrapped;
 use colored::Colorize;
+use lazy_static::lazy_static;
+use regex::Regex;
 use srcinfo::Srcinfo;
+use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -25,11 +28,50 @@ enum SrcinfoValidation {
 	GenerationFailed(String),
 }
 
+fn should_touch_file(name: &str) -> bool {
+	lazy_static! {
+		// All printable ASCII characters except '/'
+		static ref VALID: Regex = Regex::new(r"^(?:[\x21-\x7E&&[^/]]){1,255}$").unwrap();
+	}
+
+	if !VALID.is_match(name) {
+		return false;
+	}
+
+	let name_lower = name.to_ascii_lowercase();
+	!matches!(
+		name_lower.as_str(),
+		"." | ".." | "pkgbuild" | ".srcinfo" | "pkgbuild.static"
+	)
+}
+
+fn touch_files(srcinfo: &Srcinfo, dir: &Path) -> Result<(), String> {
+	let names: HashSet<&str> = std::iter::once(&srcinfo.pkg)
+		.chain(srcinfo.pkgs.iter())
+		.flat_map(|pkg| {
+			[pkg.install.as_deref(), pkg.changelog.as_deref()]
+				.into_iter()
+				.flatten()
+		})
+		.filter(|name| should_touch_file(name))
+		.collect();
+
+	for name in names {
+		std::fs::write(dir.join(name), b"")
+			.map_err(|e| format!("Failed to touch file {}: {}", name, e))?;
+	}
+	Ok(())
+}
+
 fn validate_upstream_srcinfo(
 	upstream_srcinfo: &Srcinfo,
 	upstream_pkgbuild: &str,
 ) -> SrcinfoValidation {
 	let tmp_dir = tempfile::TempDir::new().expect("Failed to create temp directory");
+
+	if let Err(e) = touch_files(upstream_srcinfo, tmp_dir.path()) {
+		return SrcinfoValidation::GenerationFailed(e);
+	}
 
 	let pkgbuild_path = tmp_dir.path().join("PKGBUILD");
 	std::fs::write(&pkgbuild_path, upstream_pkgbuild)
@@ -302,6 +344,123 @@ mod tests {
 			risk,
 			modified: true,
 		}
+	}
+
+	// -------------------------------------------------------------------------
+	// should_touch_file
+	// -------------------------------------------------------------------------
+
+	#[test]
+	fn touch_file_valid_typical_install() {
+		assert!(should_touch_file("miniconda3.install"));
+	}
+
+	#[test]
+	fn touch_file_valid_typical_changelog() {
+		assert!(should_touch_file("package.changelog"));
+	}
+
+	#[test]
+	fn touch_file_valid_single_char() {
+		assert!(should_touch_file("a"));
+	}
+
+	#[test]
+	fn touch_file_valid_dot_prefixed() {
+		// A name like ".install" is a hidden file but still valid.
+		assert!(should_touch_file(".install"));
+	}
+
+	#[test]
+	fn touch_file_valid_255_bytes() {
+		// Exactly at the NAME_MAX limit.
+		let name = "a".repeat(255);
+		assert!(should_touch_file(&name));
+	}
+
+	#[test]
+	fn touch_file_valid_all_printable_ascii_chars() {
+		// Spot-check a name using a variety of printable ASCII characters.
+		assert!(should_touch_file("foo-bar_baz.v2~install"));
+	}
+
+	// --- Slash (path separator) ---
+
+	#[test]
+	fn touch_file_rejects_parent_dir_traversal() {
+		assert!(!should_touch_file("../evil"));
+	}
+
+	#[test]
+	fn touch_file_rejects_subdir_path() {
+		assert!(!should_touch_file("foo/bar.install"));
+	}
+
+	#[test]
+	fn touch_file_rejects_absolute_path() {
+		assert!(!should_touch_file("/etc/passwd"));
+	}
+
+	// --- Empty / dot / double-dot ---
+
+	#[test]
+	fn touch_file_rejects_empty_string() {
+		assert!(!should_touch_file(""));
+	}
+
+	#[test]
+	fn touch_file_rejects_single_dot() {
+		assert!(!should_touch_file("."));
+	}
+
+	#[test]
+	fn touch_file_rejects_double_dot() {
+		assert!(!should_touch_file(".."));
+	}
+
+	// --- Length ---
+
+	#[test]
+	fn touch_file_rejects_256_bytes() {
+		let name = "a".repeat(256);
+		assert!(!should_touch_file(&name));
+	}
+
+	// --- Invalid bytes ---
+
+	#[test]
+	fn touch_file_rejects_space() {
+		// Space (0x20) is one below the accepted range \x21-\x7E.
+		assert!(!should_touch_file("foo bar"));
+	}
+
+	#[test]
+	fn touch_file_rejects_del() {
+		// DEL (0x7F) is one above the accepted range \x21-\x7E.
+		assert!(!should_touch_file("foo\x7fbar"));
+	}
+
+	#[test]
+	fn touch_file_rejects_non_ascii() {
+		// Any byte > 0x7F is rejected; U+00A0 (non-breaking space) is representative.
+		assert!(!should_touch_file("foo\u{00A0}bar"));
+	}
+
+	// --- Reserved names (case-insensitive) ---
+
+	#[test]
+	fn touch_file_rejects_pkgbuild() {
+		assert!(!should_touch_file("PkGbUiLd"));
+	}
+
+	#[test]
+	fn touch_file_rejects_srcinfo() {
+		assert!(!should_touch_file(".SrCiNfO"));
+	}
+
+	#[test]
+	fn touch_file_rejects_pkgbuild_static() {
+		assert!(!should_touch_file("PkGbUiLd.StAtIc"));
 	}
 
 	#[test]
