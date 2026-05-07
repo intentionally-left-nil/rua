@@ -1,6 +1,6 @@
 [package]
 name = "rua"
-version = "0.21.1"
+version = "0.21.2"
 rust-version = "1.93.1"
 description = "Secure jailed AUR helper for Arch Linux"
 authors = [
@@ -18,7 +18,7 @@ build = "build.rs"
 default=["testpacman", "rustls-tls"]
 testpacman = []  # whether to perform pacman checks on tests
 native-tls = ["raur/native-tls"] # build with support for OS native TLS
-rustls-tls = ["raur/rusttls-tls"] # build with rustls TLS 
+rustls-tls = ["raur/rusttls-tls"] # build with rustls TLS
 
 [build-dependencies]
 structopt = "0.3.26"
