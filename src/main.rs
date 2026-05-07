@@ -8,6 +8,7 @@ mod aur_rpc_utils;
 mod auto_merge;
 mod cli_args;
 mod config;
+mod config_edit;
 mod evaluation;
 mod git_utils;
 mod pacman;
