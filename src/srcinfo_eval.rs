@@ -360,6 +360,22 @@ fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 	// Both are positive integers — check for decrease
 	if let (Some(p), Some(n)) = (prev_int, new_int) {
 		if n < p {
+			// A pkgrel decrease is only suspicious on the same version.
+			// When pkgver also changed, resetting pkgrel (e.g. to 1) is expected.
+			let ver_changed = previous.base.pkgver != proposed.base.pkgver;
+			if ver_changed {
+				return Evaluation {
+					name: EvaluationName::Pkgrel,
+					pkgname,
+					description: format!(
+						"pkgrel reset from {} to {} alongside pkgver change",
+						prev_rel, new_rel
+					),
+					risk: RiskLevel::Low,
+					modified: true,
+					detail: None,
+				};
+			}
 			return Evaluation {
 				name: EvaluationName::Pkgrel,
 				pkgname,
@@ -2190,6 +2206,16 @@ pkgname = example-extra
 				previous: |s| s.base.pkgrel = "5".to_string(),
 				proposed: |s| s.base.pkgrel = "2".to_string(),
 				risk: RiskLevel::High,
+				modified: true,
+			},
+			PkgrelCase {
+				name: "decrease_with_version_bump",
+				previous: |s| s.base.pkgrel = "5".to_string(),
+				proposed: |s| {
+					s.base.pkgver = "1.0.1".to_string();
+					s.base.pkgrel = "1".to_string();
+				},
+				risk: RiskLevel::Low,
 				modified: true,
 			},
 		];
