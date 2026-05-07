@@ -1,5 +1,6 @@
 use crate::config::RuaConfig;
-use crate::evaluation::{Evaluation, RiskLevel};
+use crate::config_edit;
+use crate::evaluation::{Evaluation, EvaluationDetail, RiskLevel};
 use crate::git_utils;
 use crate::pkgbuild_eval;
 use crate::rua_paths::RuaPaths;
@@ -237,13 +238,6 @@ pub fn try_auto_merge(
 		return false;
 	}
 
-	let config = RuaConfig::load(&rua_paths.config_file);
-
-	if !force && config.packages.get(pkgbase).and_then(|p| p.auto_merge) == Some(false) {
-		eprintln!("Auto-merge: disabled for {} via config, skipping.", pkgbase);
-		return false;
-	}
-
 	// Security check specific to live auto-merge; skipped in history replay.
 	let upstream_srcinfo_text = git_utils::show_file(dir, "upstream/master", ".SRCINFO", rua_paths);
 	let upstream_srcinfo = Srcinfo::from_str(&upstream_srcinfo_text)
@@ -265,69 +259,149 @@ pub fn try_auto_merge(
 			);
 			eprintln!("Would you like to proceed anyway? [y/N]");
 			if terminal_util::read_line_lowercase() != "y" {
-				// Caller falls through to manual review so the user can inspect the mismatch.
 				return false;
 			}
 		}
 		SrcinfoValidation::Matches => {}
 	}
 
-	let evaluations = match evaluate_ref_pair(dir, "HEAD", "upstream/master", &config, rua_paths) {
-		EvalPairOutcome::Success(evals) => evals,
-		EvalPairOutcome::AbsentSrcinfo => {
+	// Main evaluation loop — re-entered on retry after config edits.
+	loop {
+		let config = RuaConfig::load(&rua_paths.config_file);
+
+		if !force && config.packages.get(pkgbase).and_then(|p| p.auto_merge) == Some(false) {
+			eprintln!("Auto-merge: disabled for {} via config, skipping.", pkgbase);
+			return false;
+		}
+
+		let evaluations =
+			match evaluate_ref_pair(dir, "HEAD", "upstream/master", &config, rua_paths) {
+				EvalPairOutcome::Success(evals) => evals,
+				EvalPairOutcome::AbsentSrcinfo => {
+					eprintln!(
+						"Auto-merge: no previous .SRCINFO found in HEAD for {}, skipping.",
+						pkgbase
+					);
+					return false;
+				}
+				EvalPairOutcome::MalformedSrcinfo(err) => {
+					eprintln!(
+						"Auto-merge: .SRCINFO parse error for {}, skipping: {}",
+						pkgbase, err
+					);
+					return false;
+				}
+			};
+
+		eprintln!(
+			"Auto-merge: risk evaluations for {} ({} check{}):",
+			pkgbase,
+			evaluations.len(),
+			if evaluations.len() == 1 { "" } else { "s" }
+		);
+
+		let all_pass = evaluations.iter().fold(true, |acc, eval| {
+			let passes = evaluation_passes(eval, &config, pkgbase, cli_threshold);
+			print_evaluation(eval, passes, cli_threshold);
+			acc && passes
+		});
+
+		if all_pass {
+			if evaluations.is_empty() {
+				eprintln!("Auto-merge: no changes detected for {}, merging.", pkgbase);
+			} else {
+				eprintln!("Auto-merge: all checks passed for {}, merging.", pkgbase);
+			}
+
+			git_utils::merge_upstream(dir, rua_paths);
+
+			if git_utils::is_upstream_merged(dir, rua_paths) {
+				return true;
+			}
+
 			eprintln!(
-				"Auto-merge: no previous .SRCINFO found in HEAD for {}, skipping auto-merge.",
+				"Auto-merge: merge failed for {}, falling back to manual review.",
 				pkgbase
 			);
 			return false;
 		}
-		EvalPairOutcome::MalformedSrcinfo(err) => {
+
+		// Check if the failure is due to source URL mismatch — offer interactive fix.
+		// Find the first source mismatch with structured URL data.
+		let unmatched_urls = evaluations.iter().find_map(|eval| match &eval.detail {
+			Some(EvaluationDetail::SourceMismatch { old_url, new_url }) => {
+				Some((old_url.clone(), new_url.clone()))
+			}
+			_ => None,
+		});
+
+		if unmatched_urls.is_none() {
 			eprintln!(
-				"Auto-merge: .SRCINFO parse error for {}, skipping auto-merge: {}",
-				pkgbase, err
+				"Auto-merge: blocked for {} due to the checks marked above.",
+				pkgbase
 			);
 			return false;
 		}
-	};
 
-	eprintln!(
-		"Auto-merge: risk evaluations for {} ({} check{}):",
-		pkgbase,
-		evaluations.len(),
-		if evaluations.len() == 1 { "" } else { "s" }
-	);
+		match prompt_source_mismatch(pkgbase, rua_paths, unmatched_urls.as_ref().unwrap()) {
+			SourceMismatchAction::Retry => continue,
+			SourceMismatchAction::Skip => return false,
+		}
+	}
+}
 
-	let all_pass = evaluations.iter().fold(true, |acc, eval| {
-		let passes = evaluation_passes(eval, &config, pkgbase, cli_threshold);
-		print_evaluation(eval, passes, cli_threshold);
-		acc && passes
-	});
+enum SourceMismatchAction {
+	Retry,
+	Skip,
+}
 
-	if !all_pass {
+/// Presents the [E]dit/[R]etry/[S]kip prompt for source URL mismatches.
+/// Loops internally until the user picks retry or skip.
+fn prompt_source_mismatch(
+	pkgbase: &str,
+	rua_paths: &RuaPaths,
+	unmatched_urls: &(String, String),
+) -> SourceMismatchAction {
+	loop {
+		eprintln!();
 		eprintln!(
-			"Auto-merge: blocked for {} due to the checks marked above.",
+			"Auto-merge: blocked for {} due to source URL mismatch.",
 			pkgbase
 		);
-		return false;
+		eprint!(
+			"{}{}, ",
+			"[E]".bold().green(),
+			"=edit config to add source pattern".green()
+		);
+		eprint!(
+			"{}{}, ",
+			"[R]".bold().yellow(),
+			"=retry auto-merge".yellow()
+		);
+		eprintln!("{}{}.", "[S]".bold().red(), "=skip auto-merge".red());
+
+		match terminal_util::read_line_lowercase().as_str() {
+			"e" => {
+				let (old_url, new_url) = unmatched_urls;
+				config_edit::prepare_sources_for_edit(
+					&rua_paths.config_file,
+					pkgbase,
+					old_url,
+					new_url,
+				);
+				let config_dir = rua_paths.config_file.parent().unwrap_or(Path::new("."));
+				terminal_util::run_env_command(
+					config_dir,
+					"EDITOR",
+					"vi",
+					&[rua_paths.config_file.to_str().unwrap_or("config.toml")],
+				);
+			}
+			"r" => return SourceMismatchAction::Retry,
+			"s" => return SourceMismatchAction::Skip,
+			_ => {}
+		}
 	}
-
-	if evaluations.is_empty() {
-		eprintln!("Auto-merge: no changes detected for {}, merging.", pkgbase);
-	} else {
-		eprintln!("Auto-merge: all checks passed for {}, merging.", pkgbase);
-	}
-
-	git_utils::merge_upstream(dir, rua_paths);
-
-	if git_utils::is_upstream_merged(dir, rua_paths) {
-		return true;
-	}
-
-	eprintln!(
-		"Auto-merge: merge failed for {}, falling back to manual review.",
-		pkgbase
-	);
-	false
 }
 
 #[cfg(test)]
@@ -343,6 +417,7 @@ mod tests {
 			description: "test".to_string(),
 			risk,
 			modified: true,
+			detail: None,
 		}
 	}
 

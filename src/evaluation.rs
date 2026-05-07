@@ -55,4 +55,13 @@ pub struct Evaluation {
 	pub description: String,
 	pub risk: RiskLevel,
 	pub modified: bool,
+	pub detail: Option<EvaluationDetail>,
+}
+
+/// Structured metadata attached to evaluations that need to carry data
+/// beyond the human-readable description.
+#[derive(Debug, Clone)]
+pub enum EvaluationDetail {
+	/// A source URL changed without matching any configured pattern.
+	SourceMismatch { old_url: String, new_url: String },
 }

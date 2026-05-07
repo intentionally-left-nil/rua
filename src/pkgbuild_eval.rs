@@ -187,6 +187,7 @@ pub fn evaluate_pkgbuild_diff(
 				RiskLevel::Low
 			},
 			modified,
+			detail: None,
 		}];
 	}
 
@@ -216,6 +217,7 @@ pub fn evaluate_pkgbuild_diff(
 			description,
 			risk,
 			modified,
+			detail: None,
 		});
 	}
 
@@ -245,6 +247,7 @@ pub fn evaluate_pkgbuild_diff(
 			description,
 			risk: RiskLevel::Medium,
 			modified: true,
+			detail: None,
 		});
 	}
 
@@ -278,6 +281,7 @@ pub fn evaluate_pkgbuild_diff(
 			description,
 			risk,
 			modified,
+			detail: None,
 		});
 	}
 

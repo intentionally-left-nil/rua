@@ -4,7 +4,7 @@ use regex::Regex;
 use srcinfo::{Package, Srcinfo};
 use url::Url;
 
-pub use crate::evaluation::{Evaluation, EvaluationName, RiskLevel};
+pub use crate::evaluation::{Evaluation, EvaluationDetail, EvaluationName, RiskLevel};
 
 pub fn evaluate_srcinfo_diff(
 	previous: &Srcinfo,
@@ -72,6 +72,7 @@ fn evaluate_epoch(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Ev
 			description: format!("Epoch unchanged ({})", epoch_display(prev_epoch)),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		}
 	} else {
 		Evaluation {
@@ -84,6 +85,7 @@ fn evaluate_epoch(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> Ev
 			),
 			risk: RiskLevel::High,
 			modified: true,
+			detail: None,
 		}
 	}
 }
@@ -166,6 +168,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 			description: format!("pkgver unchanged ({})", prev_ver),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		};
 	}
 
@@ -183,6 +186,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 			),
 			risk: RiskLevel::High,
 			modified: true,
+			detail: None,
 		};
 	}
 
@@ -199,6 +203,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
 					risk: RiskLevel::High,
 					modified: true,
+					detail: None,
 				};
 			}
 			if style_changed {
@@ -211,6 +216,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					),
 					risk: RiskLevel::Medium,
 					modified: true,
+					detail: None,
 				};
 			}
 			Evaluation {
@@ -219,6 +225,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
 				risk: RiskLevel::Low,
 				modified: true,
+				detail: None,
 			}
 		}
 		PkgverStyle::Semver => {
@@ -229,6 +236,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
 					risk: RiskLevel::High,
 					modified: true,
+					detail: None,
 				};
 			}
 			// Major version bump: only meaningful if the previous version is also semver
@@ -251,6 +259,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 						),
 						risk: RiskLevel::Medium,
 						modified: true,
+						detail: None,
 					};
 				}
 			}
@@ -264,6 +273,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					),
 					risk: RiskLevel::Medium,
 					modified: true,
+					detail: None,
 				};
 			}
 			Evaluation {
@@ -272,6 +282,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
 				risk: RiskLevel::Low,
 				modified: true,
+				detail: None,
 			}
 		}
 		PkgverStyle::Other => {
@@ -282,6 +293,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					description: format!("pkgver decreased from {} to {}", prev_ver, new_ver),
 					risk: RiskLevel::High,
 					modified: true,
+					detail: None,
 				};
 			}
 			if style_changed {
@@ -294,6 +306,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 					),
 					risk: RiskLevel::Medium,
 					modified: true,
+					detail: None,
 				};
 			}
 			Evaluation {
@@ -302,6 +315,7 @@ fn evaluate_pkgver(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 				description: format!("pkgver changed from {} to {}", prev_ver, new_ver),
 				risk: RiskLevel::Low,
 				modified: true,
+				detail: None,
 			}
 		}
 	}
@@ -318,6 +332,7 @@ fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 			description: format!("pkgrel unchanged ({})", prev_rel),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		};
 	}
 
@@ -336,6 +351,7 @@ fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 				),
 				risk: RiskLevel::Medium,
 				modified: true,
+				detail: None,
 			};
 		}
 		_ => {}
@@ -350,6 +366,7 @@ fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 				description: format!("pkgrel decreased from {} to {}", prev_rel, new_rel),
 				risk: RiskLevel::High,
 				modified: true,
+				detail: None,
 			};
 		}
 	}
@@ -360,6 +377,7 @@ fn evaluate_pkgrel(previous: &Srcinfo, proposed: &Srcinfo, pkgname: String) -> E
 		description: format!("pkgrel changed from {} to {}", prev_rel, new_rel),
 		risk: RiskLevel::Low,
 		modified: true,
+		detail: None,
 	}
 }
 
@@ -379,6 +397,7 @@ fn evaluate_unexplained_update(
 				.to_string(),
 			risk: RiskLevel::Medium,
 			modified: true,
+			detail: None,
 		}
 	} else {
 		Evaluation {
@@ -387,6 +406,7 @@ fn evaluate_unexplained_update(
 			description: "pkgver or pkgrel changed, as expected".to_string(),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		}
 	}
 }
@@ -463,6 +483,7 @@ fn evaluate_array_field(
 			description: format!("{} unchanged", field_name),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		}
 	} else {
 		Evaluation {
@@ -475,6 +496,7 @@ fn evaluate_array_field(
 			),
 			risk: risk_if_modified,
 			modified: true,
+			detail: None,
 		}
 	}
 }
@@ -548,6 +570,7 @@ fn evaluate_insecure_checksum(
 					.to_string(),
 			risk: RiskLevel::High,
 			modified: !prev_insecure,
+			detail: None,
 		}
 	} else {
 		Evaluation {
@@ -556,6 +579,7 @@ fn evaluate_insecure_checksum(
 			description: "No insecure checksums (md5/sha1) present".to_string(),
 			risk: RiskLevel::Low,
 			modified: prev_insecure,
+			detail: None,
 		}
 	}
 }
@@ -654,6 +678,7 @@ fn evaluate_checksum_consistency(
 			description: format!("Checksum arrays are inconsistent: {}", msg),
 			risk: RiskLevel::High,
 			modified: prev_error.is_none(),
+			detail: None,
 		},
 		None => Evaluation {
 			name: EvaluationName::ChecksumConsistency,
@@ -661,6 +686,7 @@ fn evaluate_checksum_consistency(
 			description: "Checksum arrays are consistent".to_string(),
 			risk: RiskLevel::Low,
 			modified: prev_error.is_some(),
+			detail: None,
 		},
 	}
 }
@@ -770,6 +796,7 @@ fn evaluate_source(
 				),
 				risk: RiskLevel::High,
 				modified: true,
+				detail: None,
 			};
 		}
 
@@ -798,6 +825,10 @@ fn evaluate_source(
 					),
 					risk: RiskLevel::High,
 					modified: true,
+					detail: Some(EvaluationDetail::SourceMismatch {
+						old_url: old_url.to_string(),
+						new_url: new_url.to_string(),
+					}),
 				};
 			}
 		}
@@ -817,6 +848,7 @@ fn evaluate_source(
 		},
 		risk: RiskLevel::Low,
 		modified: any_changed,
+		detail: None,
 	}
 }
 
@@ -917,6 +949,7 @@ fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Strin
 						),
 						risk: RiskLevel::High,
 						modified: !prev_also_skip,
+						detail: None,
 					};
 				}
 
@@ -939,6 +972,7 @@ fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Strin
 							),
 							risk: RiskLevel::High,
 							modified: true,
+							detail: None,
 						};
 					}
 				}
@@ -966,6 +1000,7 @@ fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Strin
 						),
 						risk: RiskLevel::High,
 						modified: true,
+						detail: None,
 					};
 				}
 
@@ -979,6 +1014,7 @@ fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Strin
 						),
 						risk: RiskLevel::High,
 						modified: true,
+						detail: None,
 					};
 				}
 			}
@@ -991,6 +1027,7 @@ fn evaluate_checksum_skip(previous: &Srcinfo, proposed: &Srcinfo, pkgname: Strin
 		description: "Checksum verification OK".to_string(),
 		risk: RiskLevel::Low,
 		modified: has_checksum_skip_issue(previous) && !has_checksum_skip_issue(proposed),
+		detail: None,
 	}
 }
 
@@ -1071,6 +1108,7 @@ fn evaluate_optional_string_field(
 			),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		}
 	} else {
 		Evaluation {
@@ -1084,6 +1122,7 @@ fn evaluate_optional_string_field(
 			),
 			risk: risk_if_modified,
 			modified: true,
+			detail: None,
 		}
 	}
 }
@@ -1118,6 +1157,7 @@ fn evaluate_url(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String) -> 
 			),
 			risk: RiskLevel::High,
 			modified: prev != proposed,
+			detail: None,
 		};
 	}
 
@@ -1230,6 +1270,7 @@ fn evaluate_options(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String)
 			description: "options unchanged".to_string(),
 			risk: RiskLevel::Low,
 			modified: false,
+			detail: None,
 		};
 	}
 
@@ -1245,6 +1286,7 @@ fn evaluate_options(prev_pkg: &Package, proposed_pkg: &Package, pkgname: String)
 		description: format!("options changed ({})", diff_description(&added, &removed)),
 		risk,
 		modified: true,
+		detail: None,
 	}
 }
 
