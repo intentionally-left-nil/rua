@@ -155,7 +155,7 @@ fn tar_check_archive<R: Read>(mut archive: Archive<R>, path_str: &str) {
 			}
 		} else if &string == "f" {
 			for path in &all_files {
-				if !Path::exists(Path::new(&format!("/{}", &path))) {
+				if !Path::exists(Path::new(&format!("/{}", path))) {
 					eprintln!("{}", path);
 				}
 			}
@@ -164,7 +164,7 @@ fn tar_check_archive<R: Read>(mut archive: Archive<R>, path_str: &str) {
 				eprintln!("{}", path);
 			}
 		} else if &string == "i" && has_install {
-			eprintln!("{}", &install_file);
+			eprintln!("{}", install_file);
 		} else if &string == "t" {
 			let dir = PathBuf::from(path_str);
 			let dir = dir

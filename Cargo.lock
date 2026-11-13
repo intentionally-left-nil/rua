@@ -1698,7 +1698,6 @@ dependencies = [
  "toml_edit",
  "tree-sitter",
  "tree-sitter-bash",
- "uname",
  "url",
  "xz2",
 ]
@@ -2444,15 +2443,6 @@ name = "twox-hash"
 version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
-
-[[package]]
-name = "uname"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b72f89f0ca32e4db1c04e2a72f5345d59796d4866a1ee0609084569f73683dc8"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "unicode-ident"
